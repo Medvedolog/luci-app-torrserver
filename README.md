@@ -1,6 +1,6 @@
 # TorrServer for OpenWrt + LuCI Companion
 
-Этот репозиторий собирает и публикует готовые пакеты для OpenWrt 21-25:
+Этот репозиторий собирает и публикует готовые пакеты AARCH64 для OpenWrt 21-25:
 
 - **`torrserver`** — основной daemon-пакет с бинарником TorrServer и `init.d`-сервисом
 - **`torrserver-upx`** — альтернативный вариант daemon-пакета с UPX-сжатым бинарником
