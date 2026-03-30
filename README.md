@@ -4,7 +4,7 @@
 
 - **`torrserver`** — основной daemon-пакет с бинарником TorrServer и `init.d`-сервисом
 - **`torrserver-upx`** — альтернативный вариант daemon-пакета с UPX-сжатым бинарником
-- **`luci-app-torrserver`** — лёгкая LuCI web UI-морда для домашнего роутера
+- **`luci-app-torrserver`** — лёгкая LuCI web UI-морда для домашнего роутера (TBD)
 
 Результат сборки публикуется в **GitHub Releases** в виде:
 
