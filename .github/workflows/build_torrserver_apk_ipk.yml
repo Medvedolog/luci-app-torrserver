@@ -1,4 +1,4 @@
-name: Build and Release TorrServer for OpenWrt (script v4.2)
+name: Build and Release TorrServer for OpenWrt
 
 on:
   push:
@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout local repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve build metadata
         shell: bash
@@ -95,14 +95,6 @@ jobs:
             echo "USE_UPX_INPUT=${USE_UPX_INPUT}"
           } >> "${GITHUB_ENV}"
 
-          echo "Resolved:"
-          echo "  REQUESTED_REF=${REQUESTED_REF}"
-          echo "  DISPLAY_VERSION=${DISPLAY_VERSION}"
-          echo "  PKG_VERSION=${PKG_VERSION}"
-          echo "  RELEASE_TAG=${RELEASE_TAG}"
-          echo "  RELEASE_NAME=${RELEASE_NAME}"
-          echo "  USE_UPX_INPUT=${USE_UPX_INPUT}"
-
       - name: Clone upstream repository
         shell: bash
         run: |
@@ -125,8 +117,6 @@ jobs:
             git fetch --depth 1 origin "${REF}" || true
             git checkout -q "${REF}"
           fi
-
-          echo "UPSTREAM_COMMIT=$(git rev-parse --short HEAD)" >> "${GITHUB_ENV}"
 
       - name: Setup Go from upstream go.mod
         uses: actions/setup-go@v5
@@ -200,13 +190,10 @@ jobs:
             upx --best --lzma "${OUT_BIN_UPX}" || true
           fi
 
-          echo "=== STANDARD ==="
           file "${OUT_BIN}"
           ls -lh "${OUT_BIN}"
-
-          echo "=== UPX ==="
-          file "${OUT_BIN_UPX}"
-          ls -lh "${OUT_BIN_UPX}"
+          file "${OUT_BIN_UPX}" || true
+          ls -lh "${OUT_BIN_UPX}" || true
 
       - name: Generate package files
         shell: bash
@@ -379,7 +366,6 @@ jobs:
           echo "[postinstall] current service status:"
           /etc/init.d/torrserver status 2>/dev/null || true
 
-          echo "[postinstall] if LuCI is not involved, open TorrServer web UI manually on port 8090."
           echo "[postinstall] done."
           exit 0
           EOF
@@ -548,9 +534,10 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: torrserver-openwrt-${{ env.PKG_VERSION }}
+          if-no-files-found: error
           path: |
             *.ipk
             *.apk
