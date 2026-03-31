@@ -1,0 +1,10 @@
+{
+  "admin/services/torrserver": {
+    "title": "TorrServer",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "torrserver/overview"
+    }
+  }
+}
