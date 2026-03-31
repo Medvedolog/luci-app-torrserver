@@ -17,7 +17,6 @@ local function safe_host(v)
     return "192.168.1.1"
 end
 
--- экранирование значений для вставки в JS var '...'
 local function jsq(s)
     s = tostring(s or "")
     s = s:gsub("\\", "\\\\")
@@ -43,40 +42,36 @@ local url_stop    = dsp.build_url("admin", "services", "torrserver", "stop")
 local url_restart = dsp.build_url("admin", "services", "torrserver", "restart")
 local url_log     = dsp.build_url("admin", "services", "torrserver", "get_log")
 
--- ── Предупреждение если daemon не установлен ──
-warn = m:section(TypedSection, "_warn", nil)
-warn.anonymous = true
+-- ── Единственная секция: NamedSection "main" реально существует в UCI ──
+-- TypedSection "_warn" убран — он искал несуществующий тип и рендерил
+-- "Здесь пока что пусто", блокируя всю страницу.
+s = m:section(NamedSection, "main", "torrserver", translate("TorrServer"))
+s.anonymous  = true
+s.addremove  = false
 
+-- Предупреждение об отсутствии daemon — DummyValue в той же секции
 local warning_html = ""
 if not bin_present or not init_present then
-    -- string.format здесь безопасен: нет CSS-процентов, только %s
-    warning_html = string.format(
-        '<div style="margin:0 0 16px 0;padding:12px 14px;border-radius:8px;' ..
+    warning_html = '<div style="margin:0 0 16px 0;padding:12px 14px;border-radius:8px;' ..
         'border:1px solid rgba(255,180,0,.45);background:rgba(255,180,0,.10);' ..
         'color:var(--text-color-high,#f5f5f5);">' ..
         '<strong>Нужен установленный TorrServer daemon.</strong><br/>' ..
-        'Ожидаются:<br/>' ..
-        '<code>/usr/bin/torrserver</code><br/>' ..
-        '<code>/etc/init.d/torrserver</code><br/><br/>' ..
-        'Текущий статус:<br/>' ..
-        'binary: %s<br/>init.d: %s<br/>config: %s</div>',
-        bin_present  and "OK" or "<b>MISSING</b>",
-        init_present and "OK" or "<b>MISSING</b>",
-        cfg_present  and "OK" or "<b>MISSING</b>"
-    )
+        'Ожидаются: <code>/usr/bin/torrserver</code> и <code>/etc/init.d/torrserver</code><br/><br/>' ..
+        'binary: ' .. (bin_present  and "OK" or "<b>MISSING</b>") .. '<br/>' ..
+        'init.d: ' .. (init_present and "OK" or "<b>MISSING</b>") .. '<br/>' ..
+        'config: ' .. (cfg_present  and "OK" or "<b>MISSING</b>") ..
+        '</div>'
 end
 
-w = warn:option(DummyValue, "_warn_box")
-w.rawhtml = true
-w.value   = warning_html
+if warning_html ~= "" then
+    local wbox = s:option(DummyValue, "_warn_box")
+    wbox.rawhtml = true
+    wbox.value   = warning_html
+end
 
--- ── Секция мониторинга ──
-s = m:section(NamedSection, "main", "torrserver", translate("Мониторинг"))
-s.anonymous = true
-
--- URL-константы вставляются через конкатенацию .. jsq(..) .. прямо в [[ ]].
--- [[ ]] — raw Lua string, % в CSS передаются дословно, экранировать не нужно.
--- string.format здесь НЕ используется — именно поэтому нет проблемы с % в CSS.
+-- ── Мониторинг ──
+-- HTML-блок через [[ ]] — string.format не используется, % в CSS безопасны.
+-- URL вставляются конкатенацией .. jsq(..) ..
 local monitor_html = [[
 <style>
 .ts-wrap{display:flex;flex-wrap:wrap;gap:15px;margin-bottom:20px;align-items:stretch}
@@ -233,8 +228,6 @@ local monitor_html = [[
         xhr.send(null);
     }
 
-    /* Кнопки: createElement + addEventListener.
-       Нет строк с onclick="srv('...')" — проблема кавычек в атрибутах устранена. */
     function makeBtn(id, cls, label, action) {
         var b = document.createElement('button');
         b.type        = 'button';
@@ -320,7 +313,6 @@ local monitor_html = [[
         });
     }
 
-    /* tsToggleLog в window scope — доступна из onclick="tsToggleLog()" в HTML выше */
     window.tsToggleLog = function() {
         var box = el('ts_log');
         var btn = el('log_toggle_btn');
@@ -414,7 +406,6 @@ local monitor_html = [[
         setTimeout(function() { forceUpdate(); schedulePoll(); }, nextPollDelay());
     }
 
-    /* Запуск после готовности DOM */
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function() {
             forceUpdate();
@@ -429,22 +420,19 @@ local monitor_html = [[
 </script>
 ]]
 
-st = s:option(DummyValue, "_monitor")
-st.rawhtml = true
-st.value   = monitor_html
+local mon = s:option(DummyValue, "_monitor")
+mon.rawhtml = true
+mon.value   = monitor_html
 
--- ── Настройки ──
+-- ── Табы настроек — отдельная секция чтобы не мешать мониторингу ──
 conf = m:section(NamedSection, "main", "torrserver", translate("Настройки"))
 conf.anonymous = true
 conf:tab("basic",    translate("Основные"))
 conf:tab("advanced", translate("Дополнительные"))
 
--- string.format здесь безопасен: нет CSS-процентов в этой строке
-local btn_html = string.format(
-    '<input type="button" class="cbi-button cbi-button-apply" ' ..
-    'value="Открыть TorrServer Web UI" onclick="window.open(\'%s\',\'_blank\')" />',
-    jsq(url)
-)
+local btn_html = '<input type="button" class="cbi-button cbi-button-apply" ' ..
+    'value="Открыть TorrServer Web UI" ' ..
+    'onclick="window.open(\'' .. jsq(url) .. '\',\'_blank\')" />'
 btn = conf:taboption("basic", DummyValue, "_webui", translate("Веб-интерфейс"))
 btn.rawhtml = true
 btn.value   = btn_html
@@ -466,7 +454,6 @@ e:value("all",     "all")
 e:value("off",     "off")
 e.default = "tracker"
 
--- ── Дополнительные ──
 adv = conf:taboption("advanced", Value, "ip", translate("IP для bind"))
 adv.placeholder = "0.0.0.0"
 adv.datatype    = "ipaddr"
