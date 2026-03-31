@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Package version, e.g. 1.2.3'
+        description: 'Package version, e.g. 2.0.0'
         required: true
-        default: '1.2.3'
+        default: '2.0.0'
 
 jobs:
   release:
@@ -47,19 +47,29 @@ jobs:
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VER}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" | tar -xz
           sudo install -m 0755 nfpm /usr/local/bin/nfpm
 
-      - name: Prepare LuCI source tree
+      - name: Prepare package root
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p \
-            root/usr/lib/lua/luci/controller \
-            root/usr/lib/lua/luci/model/cbi \
+            root/usr/share/luci/menu.d \
+            root/usr/share/rpcd/acl.d \
+            root/www/luci-static/resources/view/torrserver \
             packaging
-          cp luci/controller/torrserver.lua root/usr/lib/lua/luci/controller/torrserver.lua
-          cp luci/model/cbi/torrserver.lua  root/usr/lib/lua/luci/model/cbi/torrserver.lua
+
+          cp luci/menu.d/luci-app-torrserver.json \
+             root/usr/share/luci/menu.d/luci-app-torrserver.json
+
+          cp luci/acl.d/luci-app-torrserver.json \
+             root/usr/share/rpcd/acl.d/luci-app-torrserver.json
+
+          cp luci/view/torrserver/overview.js \
+             root/www/luci-static/resources/view/torrserver/overview.js
+
           dos2unix \
-            root/usr/lib/lua/luci/controller/torrserver.lua \
-            root/usr/lib/lua/luci/model/cbi/torrserver.lua
+            root/usr/share/luci/menu.d/luci-app-torrserver.json \
+            root/usr/share/rpcd/acl.d/luci-app-torrserver.json \
+            root/www/luci-static/resources/view/torrserver/overview.js
 
       - name: Create package scripts
         shell: bash
@@ -70,13 +80,14 @@ jobs:
           #!/bin/sh
           echo "============================================================"
           echo " Installed ${PKG_NAME} version ${PKG_VERSION}"
+          echo " View: /www/luci-static/resources/view/torrserver/overview.js"
+          echo " Menu: /usr/share/luci/menu.d/luci-app-torrserver.json"
+          echo " ACL:  /usr/share/rpcd/acl.d/luci-app-torrserver.json"
           echo " Expected daemon binary : /usr/bin/torrserver"
           echo " Expected init script   : /etc/init.d/torrserver"
           echo "============================================================"
           [ -n "\${IPKG_INSTROOT}" ] && exit 0
-          rm -f /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
-          rm -f /tmp/opkg-lists/* 2>/dev/null || true
-          /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+          /etc/init.d/rpcd reload  >/dev/null 2>&1 || true
           /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
           [ ! -x /usr/bin/torrserver ]    && echo "[postinstall] warning: /usr/bin/torrserver not found"
           [ ! -x /etc/init.d/torrserver ] && echo "[postinstall] warning: /etc/init.d/torrserver not found"
@@ -86,13 +97,8 @@ jobs:
 
           cat > packaging/preremove.sh <<'EOF'
           #!/bin/sh
-          echo "============================================================"
-          echo " Removing luci-app-torrserver"
-          echo " TorrServer daemon package remains installed."
-          echo "============================================================"
           [ -n "${IPKG_INSTROOT}" ] && exit 0
-          rm -f /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
-          /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+          /etc/init.d/rpcd reload  >/dev/null 2>&1 || true
           /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
           echo "[preremove] done."
           exit 0
@@ -100,7 +106,7 @@ jobs:
 
           cat > packaging/postremove.sh <<'EOF'
           #!/bin/sh
-          echo "luci-app-torrserver removed. Config and data preserved."
+          echo "luci-app-torrserver removed. Daemon config preserved."
           exit 0
           EOF
 
@@ -111,7 +117,7 @@ jobs:
         run: |
           set -euxo pipefail
           export SOURCE_DATE_EPOCH=1704067200
-          export PKG_DESC="Simple LuCI web interface for managing TorrServer on OpenWrt"
+          export PKG_DESC="LuCI web interface for TorrServer on OpenWrt (ucode view, no CBI)"
 
           cat > nfpm_ipk.yaml <<EOF
           name: ${PKG_NAME}
@@ -126,15 +132,21 @@ jobs:
           license: MIT
           depends:
             - luci-base
-            - luci-compat
+            - rpcd
+            - rpcd-mod-file
           contents:
-            - src: ./root/usr/lib/lua/luci/controller/torrserver.lua
-              dst: /usr/lib/lua/luci/controller/torrserver.lua
+            - src: ./root/usr/share/luci/menu.d/luci-app-torrserver.json
+              dst: /usr/share/luci/menu.d/luci-app-torrserver.json
               file_info:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
-            - src: ./root/usr/lib/lua/luci/model/cbi/torrserver.lua
-              dst: /usr/lib/lua/luci/model/cbi/torrserver.lua
+            - src: ./root/usr/share/rpcd/acl.d/luci-app-torrserver.json
+              dst: /usr/share/rpcd/acl.d/luci-app-torrserver.json
+              file_info:
+                mode: 0644
+                mtime: 2024-01-01T00:00:00Z
+            - src: ./root/www/luci-static/resources/view/torrserver/overview.js
+              dst: /www/luci-static/resources/view/torrserver/overview.js
               file_info:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
@@ -161,14 +173,19 @@ jobs:
           license: MIT
           depends:
             - luci-base
-            - luci-compat
+            - rpcd
+            - rpcd-mod-file
           contents:
-            - src: ./root/usr/lib/lua/luci/controller/torrserver.lua
-              dst: /usr/lib/lua/luci/controller/torrserver.lua
+            - src: ./root/usr/share/luci/menu.d/luci-app-torrserver.json
+              dst: /usr/share/luci/menu.d/luci-app-torrserver.json
               file_info:
                 mode: 0644
-            - src: ./root/usr/lib/lua/luci/model/cbi/torrserver.lua
-              dst: /usr/lib/lua/luci/model/cbi/torrserver.lua
+            - src: ./root/usr/share/rpcd/acl.d/luci-app-torrserver.json
+              dst: /usr/share/rpcd/acl.d/luci-app-torrserver.json
+              file_info:
+                mode: 0644
+            - src: ./root/www/luci-static/resources/view/torrserver/overview.js
+              dst: /www/luci-static/resources/view/torrserver/overview.js
               file_info:
                 mode: 0644
           scripts:
@@ -180,13 +197,6 @@ jobs:
           nfpm package --config nfpm_apk.yaml --packager apk \
             --target "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH_APK}.apk"
           test -f "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH_APK}.apk"
-
-      - name: Show built files
-        shell: bash
-        run: |
-          set -euxo pipefail
-          echo "IPK:"; ls -la *.ipk
-          echo "APK:"; ls -la *.apk
 
       - name: Generate checksums
         shell: bash
