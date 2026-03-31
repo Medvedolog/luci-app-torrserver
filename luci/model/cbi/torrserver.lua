@@ -17,7 +17,7 @@ local function safe_host(v)
     return "192.168.1.1"
 end
 
--- экранирование значений для вставки в JS-строки (одинарные кавычки)
+-- экранирование значений для вставки в JS var '...'
 local function jsq(s)
     s = tostring(s or "")
     s = s:gsub("\\", "\\\\")
@@ -49,20 +49,17 @@ warn.anonymous = true
 
 local warning_html = ""
 if not bin_present or not init_present then
-    warning_html = string.format([[
-<div style="margin:0 0 16px 0;padding:12px 14px;border-radius:8px;
-            border:1px solid rgba(255,180,0,.45);
-            background:rgba(255,180,0,.10);
-            color:var(--text-color-high,#f5f5f5);">
-    <strong>Нужен установленный TorrServer daemon.</strong><br/>
-    Ожидаются:<br/>
-    <code>/usr/bin/torrserver</code><br/>
-    <code>/etc/init.d/torrserver</code><br/><br/>
-    Текущий статус:<br/>
-    binary: %s<br/>
-    init.d: %s<br/>
-    config: %s
-</div>]],
+    -- string.format здесь безопасен: нет CSS-процентов, только %s
+    warning_html = string.format(
+        '<div style="margin:0 0 16px 0;padding:12px 14px;border-radius:8px;' ..
+        'border:1px solid rgba(255,180,0,.45);background:rgba(255,180,0,.10);' ..
+        'color:var(--text-color-high,#f5f5f5);">' ..
+        '<strong>Нужен установленный TorrServer daemon.</strong><br/>' ..
+        'Ожидаются:<br/>' ..
+        '<code>/usr/bin/torrserver</code><br/>' ..
+        '<code>/etc/init.d/torrserver</code><br/><br/>' ..
+        'Текущий статус:<br/>' ..
+        'binary: %s<br/>init.d: %s<br/>config: %s</div>',
         bin_present  and "OK" or "<b>MISSING</b>",
         init_present and "OK" or "<b>MISSING</b>",
         cfg_present  and "OK" or "<b>MISSING</b>"
@@ -77,10 +74,10 @@ w.value   = warning_html
 s = m:section(NamedSection, "main", "torrserver", translate("Мониторинг"))
 s.anonymous = true
 
--- Все URL-константы вставляются через jsq() на стороне Lua до рендера страницы.
--- JS-код в этом файле не содержит heredoc или Lua-интерполяции —
--- только чистые строки, безопасные для YAML и для Lua [[ ]].
-local monitor_html = string.format([[
+-- URL-константы вставляются через конкатенацию .. jsq(..) .. прямо в [[ ]].
+-- [[ ]] — raw Lua string, % в CSS передаются дословно, экранировать не нужно.
+-- string.format здесь НЕ используется — именно поэтому нет проблемы с % в CSS.
+local monitor_html = [[
 <style>
 .ts-wrap{display:flex;flex-wrap:wrap;gap:15px;margin-bottom:20px;align-items:stretch}
 .ts-card{
@@ -100,18 +97,18 @@ local monitor_html = string.format([[
 .ts-pid{font-size:10px;color:var(--text-color-medium,#aaa);margin-top:3px;font-family:monospace}
 .mem-bar-bg{background:rgba(255,255,255,.08);height:6px;border-radius:3px;
             overflow:hidden;margin:8px 0 4px}
-.mem-bar-fill{background:#2196F3;height:100%;width:0%%;transition:width .5s ease-in-out}
+.mem-bar-fill{background:#2196F3;height:100%;width:0%;transition:width .5s ease-in-out}
 .cores-grid{display:flex;gap:6px;height:80px;align-items:flex-end;
             justify-content:center;margin-top:5px}
 .core-col{width:22px;display:flex;flex-direction:column;
-          align-items:center;height:100%%;justify-content:flex-end}
-.core-track{width:100%%;height:65px;background:rgba(255,255,255,.06);
+          align-items:center;height:100%;justify-content:flex-end}
+.core-track{width:100%;height:65px;background:rgba(255,255,255,.06);
             position:relative;border-radius:3px;overflow:hidden;
             border:1px solid rgba(255,255,255,.08);
             display:flex;flex-direction:column-reverse}
-.core-fill{width:100%%;background:#4caf50;height:0%%;transition:height .4s ease-out}
+.core-fill{width:100%;background:#4caf50;height:0%;transition:height .4s ease-out}
 .core-num{font-size:10px;color:var(--text-color-medium,#aaa);margin-top:4px;font-weight:bold}
-.ctrl-panel{margin-top:15px;display:flex;justify-content:space-between;gap:8px;width:100%%}
+.ctrl-panel{margin-top:15px;display:flex;justify-content:space-between;gap:8px;width:100%}
 .btn-action{flex:1;padding:8px 0;border:none;border-radius:4px;color:#fff;
             cursor:pointer;font-size:11px;font-weight:bold;text-transform:uppercase;
             transition:opacity .2s,filter .2s;text-align:center}
@@ -120,12 +117,12 @@ local monitor_html = string.format([[
 .btn-stop{background-color:#f44336}
 .btn-restart{background-color:#ff9800}
 .btn-disabled{background-color:#666!important;color:#ddd!important;
-              cursor:wait!important;filter:grayscale(100%%)}
+              cursor:wait!important;filter:grayscale(100%)}
 .log-toggle-btn{margin-top:8px;padding:5px 10px;border:none;border-radius:4px;
                 background:rgba(255,255,255,.08);color:var(--text-color-high,#f5f5f5);
-                cursor:pointer;font-size:11px;width:100%%}
+                cursor:pointer;font-size:11px;width:100%}
 .log-toggle-btn:hover{background:rgba(255,255,255,.15)}
-.log-box{width:100%%;box-sizing:border-box;margin-top:10px;
+.log-box{width:100%;box-sizing:border-box;margin-top:10px;
          background:rgba(0,0,0,.4);color:#f8f8f2;border-radius:8px;
          padding:10px;font-family:monospace;font-size:11px;
          height:300px;overflow-y:auto;white-space:pre-wrap;display:none;
@@ -139,7 +136,7 @@ local monitor_html = string.format([[
         <div class="ts-pid" id="ts_pid"></div>
         <div class="ctrl-panel" id="ctrl_panel"></div>
         <button type="button" class="log-toggle-btn" id="log_toggle_btn"
-                onclick="tsToggleLog()">Журнал &#9660;</button>
+                onclick="tsToggleLog()">&#9660; Журнал</button>
     </div>
     <div class="ts-card wide">
         <div class="ts-head">Оперативная память</div>
@@ -151,7 +148,7 @@ local monitor_html = string.format([[
     <div class="ts-card">
         <div class="ts-head">Процессор (TS)</div>
         <div class="ts-val-big">
-            <span id="ts_cpu">0</span><span class="ts-unit">%%</span>
+            <span id="ts_cpu">0</span><span class="ts-unit">%</span>
         </div>
         <div class="ts-sub">Нагрузка процесса</div>
     </div>
@@ -176,7 +173,7 @@ local monitor_html = string.format([[
             </div>
         </div>
         <div id="cores_txt" class="ts-sub" style="margin-top:5px;font-size:9px;">
-            0%% | 0%% | 0%% | 0%%
+            0% | 0% | 0% | 0%
         </div>
     </div>
 </div>
@@ -185,11 +182,11 @@ local monitor_html = string.format([[
 
 <script type="text/javascript">
 (function() {
-    var U_STAT    = '%s';
-    var U_START   = '%s';
-    var U_STOP    = '%s';
-    var U_RESTART = '%s';
-    var U_LOG     = '%s';
+    var U_STAT    = ']] .. jsq(url_status)  .. [[';
+    var U_START   = ']] .. jsq(url_start)   .. [[';
+    var U_STOP    = ']] .. jsq(url_stop)    .. [[';
+    var U_RESTART = ']] .. jsq(url_restart) .. [[';
+    var U_LOG     = ']] .. jsq(url_log)     .. [[';
 
     var pendingAction = null;
     var fastPollUntil = 0;
@@ -210,11 +207,10 @@ local monitor_html = string.format([[
         var e = el(id);
         if (!e) return;
         var h = Math.min(Math.max(Math.round(pct), 0), 100);
-        e.style.height = h + '%%';
+        e.style.height = h + '%';
         e.style.backgroundColor = getColor(h);
     }
 
-    /* HTTP — нативный XHR, без зависимости от LuCI-глобала XHR */
     function httpGet(url, cb) {
         var xhr = new XMLHttpRequest();
         xhr.open('GET', url, true);
@@ -237,13 +233,12 @@ local monitor_html = string.format([[
         xhr.send(null);
     }
 
-    /* Кнопки — FIX: createElement + addEventListener.
-       Никаких строк вида onclick="srv('start')" — кавычки внутри
-       HTML-атрибутов больше не нужны, проблема экранирования устранена. */
+    /* Кнопки: createElement + addEventListener.
+       Нет строк с onclick="srv('...')" — проблема кавычек в атрибутах устранена. */
     function makeBtn(id, cls, label, action) {
         var b = document.createElement('button');
-        b.type = 'button';
-        b.id   = id;
+        b.type        = 'button';
+        b.id          = id;
         b.className   = 'btn-action ' + cls;
         b.textContent = label;
         b.addEventListener('click', function() { tsrv(action); });
@@ -279,7 +274,7 @@ local monitor_html = string.format([[
 
         if (!controlsAllowed) {
             var d = document.createElement('button');
-            d.type = 'button';
+            d.type        = 'button';
             d.className   = 'btn-action btn-disabled';
             d.disabled    = true;
             d.textContent = 'Daemon missing';
@@ -308,9 +303,9 @@ local monitor_html = string.format([[
         if (action === 'stop')    setButtonsBusy('Stopping...');
         if (action === 'restart') setButtonsBusy('Restarting...');
 
-        var url = action === 'start'   ? U_START
-                : action === 'stop'    ? U_STOP
-                :                        U_RESTART;
+        var url = action === 'start' ? U_START
+                : action === 'stop'  ? U_STOP
+                :                      U_RESTART;
 
         httpGet(url, function(xhr, data) {
             if (data && data.ok === false) {
@@ -325,15 +320,14 @@ local monitor_html = string.format([[
         });
     }
 
-    /* Лог — FIX: tsToggleLog в window scope, доступна из onclick в другой
-       части DOM; кнопка находится в том же html_view что и #ts_log div */
+    /* tsToggleLog в window scope — доступна из onclick="tsToggleLog()" в HTML выше */
     window.tsToggleLog = function() {
         var box = el('ts_log');
         var btn = el('log_toggle_btn');
         if (!box) return;
         logVisible = !logVisible;
         box.style.display = logVisible ? 'block' : 'none';
-        if (btn) btn.textContent = logVisible ? 'Журнал \u25b4' : 'Журнал \u25be';
+        if (btn) btn.textContent = (logVisible ? '\u25b2' : '\u25bc') + ' \u0416\u0443\u0440\u043d\u0430\u043b';
         if (logVisible) fetchLog();
     };
 
@@ -360,14 +354,13 @@ local monitor_html = string.format([[
             renderButtons(false, false);
             el('ts_mem').textContent = '0';
             el('ts_cpu').textContent = '0';
-            el('mem_bar').style.width = '0%%';
+            el('mem_bar').style.width = '0%';
             pendingAction = null;
             return;
         }
 
         if (data.running) {
             if (s) s.innerHTML = '<span style="color:#4caf50">ЗАПУЩЕН</span>';
-            /* FIX: PID теперь приходит в data.pid и показывается в карточке */
             if (p) p.textContent = data.pid ? 'PID: ' + data.pid : '';
             renderButtons(true, true);
             el('ts_mem').textContent = (data.mem_kb / 1024).toFixed(1);
@@ -384,7 +377,7 @@ local monitor_html = string.format([[
             renderButtons(false, true);
             el('ts_mem').textContent = '0';
             el('ts_cpu').textContent = '0';
-            el('mem_bar').style.width = '0%%';
+            el('mem_bar').style.width = '0%';
         }
 
         if (data.sys_mem && data.sys_mem.total > 0) {
@@ -393,7 +386,7 @@ local monitor_html = string.format([[
             el('mem_details').textContent = 'Free: ' + freeMb + ' MB | Total: ' + totalMb + ' MB';
             if (data.running) {
                 var pct = (data.mem_kb / data.sys_mem.total) * 100;
-                el('mem_bar').style.width = Math.max(pct, 1) + '%%';
+                el('mem_bar').style.width = Math.max(pct, 1) + '%';
             }
         }
 
@@ -402,7 +395,7 @@ local monitor_html = string.format([[
             for (var i = 0; i < 4; i++) {
                 var val = parseFloat(data.cores[i]) || 0;
                 setBarHeight('c' + i, val);
-                txt.push(Math.round(val) + '%%');
+                txt.push(Math.round(val) + '%');
             }
         }
         el('cores_txt').textContent = txt.join(' | ');
@@ -421,7 +414,7 @@ local monitor_html = string.format([[
         setTimeout(function() { forceUpdate(); schedulePoll(); }, nextPollDelay());
     }
 
-    /* FIX: запуск после готовности DOM — элементы гарантированно существуют */
+    /* Запуск после готовности DOM */
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function() {
             forceUpdate();
@@ -434,13 +427,7 @@ local monitor_html = string.format([[
 
 })();
 </script>
-]],
-    jsq(url_status),
-    jsq(url_start),
-    jsq(url_stop),
-    jsq(url_restart),
-    jsq(url_log)
-)
+]]
 
 st = s:option(DummyValue, "_monitor")
 st.rawhtml = true
@@ -452,6 +439,7 @@ conf.anonymous = true
 conf:tab("basic",    translate("Основные"))
 conf:tab("advanced", translate("Дополнительные"))
 
+-- string.format здесь безопасен: нет CSS-процентов в этой строке
 local btn_html = string.format(
     '<input type="button" class="cbi-button cbi-button-apply" ' ..
     'value="Открыть TorrServer Web UI" onclick="window.open(\'%s\',\'_blank\')" />',
