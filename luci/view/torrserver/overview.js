@@ -7,13 +7,14 @@
 'require poll';
 
 /*
- * luci-app-torrserver — overview.js  v5
+ * luci-app-torrserver — overview.js  v6
  *
- * - Метрики процесса: luci.getProcessList (нет /proc парсинга)
- * - Системная память: system.info
- * - Лог: ubus log.read (нет logread exec)
- * - Polling: нативный poll.add/poll.start (нет рекурсивного setTimeout)
- * - Управление сервисом: luci.setInitAction + fallback file.exec
+ * Fixes vs v5:
+ * - system.info memory: байты → МБ (/ 1048576)
+ * - getProcessList: expect { '': {} } — парсим procRaw.processes || procRaw.result || []
+ * - RSS из getProcessList в КБ → МБ (/ 1024), бар = rss_bytes / mem.total
+ * - getCpuCores: file.exec /bin/cat /proc/stat (file.read заблокирован для /proc)
+ * - getLog: logread -e torrserver через file.exec (ubus log.read не фильтрует по тегу)
  */
 
 /* ── rpc declarations ── */
@@ -31,16 +32,11 @@ const callSystemInfo = rpc.declare({
     expect: { '': {} }
 });
 
+/* expect { '': {} } — берём весь объект, структура может быть { processes: [] } */
 const callProcessList = rpc.declare({
     object: 'luci',
     method: 'getProcessList',
-    expect: { result: [] }
-});
-
-const callLogRead = rpc.declare({
-    object: 'log',
-    method: 'read',
-    expect: { log: [] }
+    expect: { '': {} }
 });
 
 const callInitAction = rpc.declare({
@@ -57,26 +53,27 @@ const callFileExec = rpc.declare({
     expect: { '': {} }
 });
 
-/* /proc/stat для per-core CPU — единственное место где нужен file.read */
-const callFileRead = rpc.declare({
-    object: 'file',
-    method: 'read',
-    params: ['path'],
-    expect: { '': {} }
-});
+/* ── helpers ── */
 
-/* безопасное извлечение текста из file.read ответа */
-function txt(r) {
-    if (typeof r === 'string') return r;
-    if (r && typeof r.data === 'string') return r.data;
-    return '';
+function svcAction(action) {
+    return callInitAction('torrserver', action).then(function(ok) {
+        if (ok) return true;
+        return callFileExec('/bin/sh',
+            ['-c', '/etc/init.d/torrserver ' + action + ' >/dev/null 2>&1'], {});
+    }).catch(function() {
+        return callFileExec('/bin/sh',
+            ['-c', '/etc/init.d/torrserver ' + action + ' >/dev/null 2>&1'], {});
+    });
 }
 
+/* per-core CPU через file.exec /bin/cat /proc/stat
+   file.read для /proc заблокирован политикой rpcd на OpenWrt 24+ */
 let _prevCoreStat = null;
 function getCpuCores() {
-    return callFileRead('/proc/stat').then(function(r) {
+    return callFileExec('/bin/cat', ['/proc/stat'], {}).then(function(r) {
+        const out = (r && r.stdout) ? r.stdout : '';
         const cur = {};
-        txt(r).split('\n').forEach(function(l) {
+        out.split('\n').forEach(function(l) {
             const m = l.match(/^(cpu\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
             if (!m) return;
             const u=+m[2], n=+m[3], s=+m[4], i=+m[5];
@@ -96,45 +93,18 @@ function getCpuCores() {
     }).catch(function() { return [0,0,0,0]; });
 }
 
-/* ── service control ── */
-function svcAction(action) {
-    return callInitAction('torrserver', action).then(function(ok) {
-        if (ok) return true;
-        return callFileExec('/bin/sh',
-            ['-c', '/etc/init.d/torrserver ' + action + ' >/dev/null 2>&1'], {});
-    }).catch(function() {
-        return callFileExec('/bin/sh',
-            ['-c', '/etc/init.d/torrserver ' + action + ' >/dev/null 2>&1'], {});
-    });
-}
-
-/* ── log ── */
+/* лог через logread -e torrserver
+   ubus log.read не фильтрует по тегу демона на этой сборке */
 function getLog() {
-    return callLogRead().then(function(res) {
-        /* log.read может вернуть массив напрямую или объект { log: [...] } */
-        const entries = Array.isArray(res) ? res
-                      : (res && Array.isArray(res.log)) ? res.log
-                      : [];
-
-        if (entries.length === 0)
-            return 'Лог пуст или недоступен (ubus log.read вернул пусто).';
-
-        const lines = entries
-            .filter(function(e) {
-                const msg = (e.msg || e.MSG || e.message || '');
-                return msg.toLowerCase().indexOf('torrserver') !== -1;
-            })
-            .map(function(e) {
-                const msg = e.msg || e.MSG || e.message || JSON.stringify(e);
-                const ts  = e.time ? new Date(e.time * 1000).toLocaleString() : '';
-                return ts ? ts + '  ' + msg : msg;
-            });
-
-        return lines.length > 0
-            ? lines.join('\n')
-            : 'Нет событий torrserver в логе.';
+    return callFileExec('/sbin/logread', ['-e', 'torrserver'], {}).then(function(r) {
+        const out = (r && r.stdout) ? r.stdout
+                  : (r && r.stderr) ? r.stderr   /* busybox logread иногда пишет в stderr */
+                  : '';
+        if (!out.trim())
+            return 'Нет событий torrserver в логе.';
+        return out.trim().split('\n').slice(-200).join('\n');
     }).catch(function(e) {
-        return '[error] log.read: ' + String(e);
+        return '[error] logread: ' + String(e);
     });
 }
 
@@ -175,14 +145,14 @@ return view.extend({
         /* ── карточки ── */
         const wrap = E('div', { class: 'ts-wrap' });
 
-        const statusEl  = E('div',   { id: 'ts-status', class: 'ts-val' }, '...');
-        const pidEl     = E('small', { id: 'ts-pid',    class: 'ts-pid' }, '');
-        const ctrlEl    = E('div',   { id: 'ts-ctrl',   class: 'ts-ctrl' });
+        const statusEl = E('div',   { id: 'ts-status', class: 'ts-val' }, '...');
+        const pidEl    = E('small', { id: 'ts-pid',    class: 'ts-pid' }, '');
+        const ctrlEl   = E('div',   { id: 'ts-ctrl',   class: 'ts-ctrl' });
         wrap.appendChild(E('div', { class: 'ts-card ts-card-status' }, [
-            E('div', { class: 'ts-head' }, 'Сервис'), statusEl, pidEl, ctrlEl
+            E('div', { class: 'ts-head' }, 'СЕРВИС'), statusEl, pidEl, ctrlEl
         ]));
 
-        const memEl = E('span', { id: 'ts-mem' }, '0');
+        const memEl = E('span', { id: 'ts-mem' }, '0.0');
         const barEl = E('div',  { id: 'ts-mem-bar', class: 'ts-bar-fill' });
         const detEl = E('div',  { id: 'ts-mem-det', class: 'ts-sub' }, 'Free: — | Total: —');
         wrap.appendChild(E('div', { class: 'ts-card ts-card-wide' }, [
@@ -192,7 +162,7 @@ return view.extend({
             detEl
         ]));
 
-        const cpuEl = E('span', { id: 'ts-cpu' }, '0');
+        const cpuEl = E('span', { id: 'ts-cpu' }, '0.0');
         wrap.appendChild(E('div', { class: 'ts-card' }, [
             E('div', { class: 'ts-head' }, 'CPU (TS)'),
             E('div', { class: 'ts-val' }, [cpuEl, E('span', { class: 'ts-unit' }, '%')]),
@@ -205,9 +175,9 @@ return view.extend({
                 E('div', { class: 'ts-core-num' }, String(i))
             ]);
         });
-        const coresTxtEl = E('div', { id: 'ts-cores-txt', class: 'ts-sub' }, '—');
+        const coresTxtEl = E('div', { id: 'ts-cores-txt', class: 'ts-sub' }, '0%|0%|0%|0%');
         wrap.appendChild(E('div', { class: 'ts-card' }, [
-            E('div', { class: 'ts-head' }, 'Cores'),
+            E('div', { class: 'ts-head' }, 'CORES'),
             E('div', { class: 'ts-cores-grid' }, coreEls),
             coresTxtEl
         ]));
@@ -231,8 +201,8 @@ return view.extend({
             class: 'cbi-button cbi-button-neutral',
             click: function() {
                 logVisible = !logVisible;
-                logBox.style.display = logVisible ? 'block' : 'none';
-                logBtn.textContent   = logVisible ? '▲ Скрыть лог' : '▼ Показать лог';
+                logBox.style.display     = logVisible ? 'block' : 'none';
+                logBtn.textContent       = logVisible ? '▲ Скрыть лог' : '▼ Показать лог';
                 refreshBtn.style.display = logVisible ? '' : 'none';
                 copyBtn.style.display    = logVisible ? '' : 'none';
                 if (logVisible) doRefreshLog();
@@ -275,12 +245,6 @@ return view.extend({
         let lastState     = null;
 
         function colorPct(p) { return p > 80 ? '#f44336' : p > 50 ? '#ff9800' : '#4caf50'; }
-        function setBarH(id, pct) {
-            const e = document.getElementById(id); if (!e) return;
-            const h = Math.min(Math.max(Math.round(pct), 0), 100);
-            e.style.height = h + '%';
-            e.style.backgroundColor = colorPct(h);
-        }
 
         function renderCtrl(running) {
             const p = document.getElementById('ts-ctrl'); if (!p) return;
@@ -288,13 +252,15 @@ return view.extend({
             if (!canCtrl) {
                 if (lastState !== 'no-daemon') {
                     lastState = 'no-daemon'; p.innerHTML = '';
-                    p.appendChild(E('button', { class: 'cbi-button ts-btn-disabled', disabled: true }, 'daemon missing'));
+                    p.appendChild(E('button', {
+                        class: 'cbi-button ts-btn-disabled', disabled: true
+                    }, 'daemon missing'));
                 }
                 return;
             }
 
             const newState = running ? 'running' : 'stopped';
-            if (pendingAction) return;       /* не трогаем кнопки пока идёт действие */
+            if (pendingAction)        return;
             if (lastState === newState) return;
             lastState = newState;
             p.innerHTML = '';
@@ -305,18 +271,17 @@ return view.extend({
                     click: function() {
                         if (pendingAction) return;
                         pendingAction = action;
-                        prevPid = getCurrentPid();
+                        const pEl2 = document.getElementById('ts-pid');
+                        prevPid = pEl2 ? (pEl2.textContent.match(/\d+/) || [null])[0] : null;
                         btn.textContent = action === 'start'   ? 'Starting...' :
                                           action === 'stop'    ? 'Stopping...' : 'Restarting...';
                         btn.disabled = true;
                         btn.classList.add('ts-btn-busy');
-                        /* fast poll сразу после нажатия */
                         poll.start(1.5);
                         svcAction(action).catch(function(e) {
-                            console.error('svcAction', action, e);
+                            console.error('[ts] svcAction', action, e);
                             pendingAction = null; lastState = null;
                         });
-                        /* через 20 сек возвращаем нормальный интервал в любом случае */
                         setTimeout(function() {
                             if (!pendingAction) poll.start(5);
                         }, 20000);
@@ -333,42 +298,51 @@ return view.extend({
             }
         }
 
-        function getCurrentPid() {
-            const el = document.getElementById('ts-pid');
-            if (!el) return null;
-            const m = el.textContent.match(/\d+/);
-            return m ? m[0] : null;
-        }
-
-        /* ── главный tick через poll.add ── */
+        /* ── главный tick ── */
         function doTick() {
             return Promise.all([
                 callServiceList('torrserver'),
                 callSystemInfo(),
                 callProcessList()
             ]).then(function(res) {
-                const svcData  = res[0];
-                const sysInfo  = res[1];
-                const procList = res[2];
+                const svcData = res[0];
+                const sysInfo = res[1];
+                const procRaw = res[2];
+
+                /* getProcessList может вернуть:
+                   - массив напрямую []
+                   - { processes: [] }
+                   - { result: [] }  */
+                let procArr = [];
+                if (Array.isArray(procRaw))
+                    procArr = procRaw;
+                else if (procRaw && Array.isArray(procRaw.processes))
+                    procArr = procRaw.processes;
+                else if (procRaw && Array.isArray(procRaw.result))
+                    procArr = procRaw.result;
 
                 /* service list → running + pid */
                 const inst    = svcData && svcData.torrserver && svcData.torrserver.instances;
                 const running = inst
                     ? Object.values(inst).some(function(i) { return i.running; })
                     : false;
-                const pidRaw  = inst ? ((Object.values(inst)[0] || {}).pid || null) : null;
-                const pid     = pidRaw ? String(pidRaw) : null;
+                const pidRaw  = inst
+                    ? ((Object.values(inst)[0] || {}).pid || null)
+                    : null;
+                const pid = pidRaw ? String(pidRaw) : null;
 
                 /* сброс pendingAction */
-                if (pendingAction === 'stop'    && !running) { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
-                if (pendingAction === 'start'   &&  running) { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
-                if (pendingAction === 'restart' &&  running && pid && pid !== prevPid) {
-                    pendingAction = null; lastState = null; prevPid = null; poll.start(5);
-                }
+                if (pendingAction === 'stop'    && !running)
+                    { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
+                if (pendingAction === 'start'   &&  running)
+                    { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
+                if (pendingAction === 'restart' &&  running && pid && pid !== prevPid)
+                    { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
 
                 /* статус */
                 const st  = document.getElementById('ts-status');
                 const pEl = document.getElementById('ts-pid');
+
                 if (!canCtrl) {
                     if (st) st.innerHTML = '<span style="color:#ffb74d">NO DAEMON</span>';
                     renderCtrl(false); return;
@@ -387,71 +361,63 @@ return view.extend({
                 }
                 renderCtrl(running);
 
-                /* ── метрики через getProcessList + system.info ── */
-                const mem   = sysInfo && sysInfo.memory   ? sysInfo.memory   : null;
-                const tsProc = Array.isArray(procList)
-                    ? procList.find(function(p) {
-                        return (p.COMMAND||p.command||'').toLowerCase().indexOf('torrserver') !== -1;
-                      })
-                    : null;
+                /* ── метрики ── */
+                const mem    = sysInfo && sysInfo.memory ? sysInfo.memory : null;
+                const tsProc = procArr.find(function(p) {
+                    return (p.COMMAND || p.command || '').toLowerCase().indexOf('torrserver') !== -1;
+                });
 
-                /* RAM системы */
+                /* системная RAM: system.info отдаёт байты → МБ */
                 const dEl = document.getElementById('ts-mem-det');
                 if (mem && mem.total) {
-                    const freeMb  = Math.round((mem.free  || 0) / 1024);
-                    const totalMb = Math.round( mem.total        / 1024);
+                    const freeMb  = Math.round((mem.free || 0) / 1048576);
+                    const totalMb = Math.round(mem.total       / 1048576);
                     if (dEl) dEl.textContent = 'Free: ' + freeMb + ' MB | Total: ' + totalMb + ' MB';
                 }
 
-                /* RAM + CPU процесса */
                 const mEl = document.getElementById('ts-mem');
                 const bEl = document.getElementById('ts-mem-bar');
                 const cEl = document.getElementById('ts-cpu');
 
                 if (tsProc && running) {
-                    /* RSS (Resident Set Size) — реальная физическая память.
-                       Go резервирует огромный VSZ виртуально, RSS показывает факт. */
-                    const rss    = parseInt(tsProc.RSS || tsProc.rss || 0); /* KB */
+                    /* getProcessList отдаёт RSS в КБ → МБ */
+                    const rssKb  = parseInt(tsProc.RSS || tsProc.rss || 0);
                     const cpuPct = parseFloat(tsProc['%CPU'] || tsProc.cpu || 0);
-                    const memMb  = (rss / 1024).toFixed(1);
-                    if (mEl) mEl.textContent = memMb;
+                    if (mEl) mEl.textContent = (rssKb / 1024).toFixed(1);
                     if (cEl) cEl.textContent = cpuPct.toFixed(1);
                     if (bEl && mem && mem.total) {
-                        /* mem.total в байтах, rss в KB → приводим */
-                        const pct = Math.max((rss * 1024 / mem.total) * 100, 1);
+                        /* rssKb * 1024 = байты; mem.total в байтах */
+                        const pct = Math.max((rssKb * 1024 / mem.total) * 100, 1);
                         bEl.style.width = pct + '%';
                         bEl.style.backgroundColor = colorPct(pct);
                     }
                 } else {
-                    if (mEl) mEl.textContent = '0';
-                    if (cEl) cEl.textContent = '0';
+                    if (mEl) mEl.textContent = '0.0';
+                    if (cEl) cEl.textContent = '0.0';
                     if (bEl) { bEl.style.width = '0%'; bEl.style.backgroundColor = '#2196F3'; }
                 }
 
-                /* per-core CPU через /proc/stat — отдельный вызов,
-                   остальные метрики на нативных ubus */
+                /* per-core CPU — отдельный вызов не блокирует основные метрики */
                 getCpuCores().then(function(cores) {
                     const ctEl = document.getElementById('ts-cores-txt');
-                    const txt2 = cores.map(function(v, i) {
-                        const e = document.getElementById('ts-c'+i);
+                    const labels = cores.map(function(v, i) {
+                        const e = document.getElementById('ts-c' + i);
                         if (e) {
-                            const h = Math.min(Math.max(v,0),100);
+                            const h = Math.min(Math.max(v, 0), 100);
                             e.style.height = h + '%';
                             e.style.backgroundColor = colorPct(h);
                         }
                         return Math.round(v) + '%';
                     });
-                    if (ctEl) ctEl.textContent = txt2.join(' | ');
+                    if (ctEl) ctEl.textContent = labels.join(' | ');
                 });
 
             }).catch(function(e) {
-                console.error('[ts] doTick error:', e);
+                console.error('[ts] doTick:', e);
             });
         }
 
-        /* запуск polling — 5 сек нормальный интервал */
         poll.add(doTick, 5);
-
         return root;
     },
 
@@ -518,7 +484,7 @@ return view.extend({
             ['WebDAV',              'webdav',      '0',                       'chk'],
             ['Proxy URL',           'proxyurl',    'http://127.0.0.1:8080',  'inp']
         ].forEach(function(r) {
-            advBody.appendChild(row(r[0], r[3] === 'chk' ? chk(r[1],r[2]) : inp(r[1],r[2])));
+            advBody.appendChild(row(r[0], r[3] === 'chk' ? chk(r[1], r[2]) : inp(r[1], r[2])));
         });
 
         let advOpen = false;
@@ -606,30 +572,25 @@ return view.extend({
             .ts-ctrl{margin-top:10px;display:flex;gap:6px;
                 justify-content:center;flex-wrap:wrap}
             .ts-btn-start  {background:#4caf50!important;color:#fff!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:pointer;
-                font-size:11px;font-weight:bold}
+                border-radius:4px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:bold}
             .ts-btn-stop   {background:#f44336!important;color:#fff!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:pointer;
-                font-size:11px;font-weight:bold}
+                border-radius:4px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:bold}
             .ts-btn-restart{background:#ff9800!important;color:#fff!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:pointer;
-                font-size:11px;font-weight:bold}
+                border-radius:4px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:bold}
             .ts-btn-disabled{background:#555!important;color:#aaa!important;border:none;
                 border-radius:4px;padding:5px 14px;cursor:not-allowed;font-size:11px}
             .ts-btn-busy{opacity:.55;filter:grayscale(60%);pointer-events:none}
             .ts-log-bar{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
             .ts-log{width:100%;box-sizing:border-box;margin-top:6px;
                 background:var(--background-color-low,#1a1a1a);
-                color:var(--text-color-high,#f8f8f2);
-                border-radius:8px;padding:10px;font-family:monospace;font-size:11px;
+                color:var(--text-color-high,#f8f8f2);border-radius:8px;
+                padding:10px;font-family:monospace;font-size:11px;
                 height:260px;overflow-y:auto;white-space:pre-wrap;
                 border:1px solid var(--border-color-medium,rgba(255,255,255,.12))}
-            .ts-hr{margin:16px 0;border:none;
-                border-top:1px solid rgba(255,255,255,.1)}
+            .ts-hr{margin:16px 0;border:none;border-top:1px solid rgba(255,255,255,.1)}
             .ts-settings{margin-top:4px}
             .ts-section-title{font-size:13px;font-weight:600;
-                color:var(--text-color-high,#f5f5f5);
-                margin:14px 0 8px;
+                color:var(--text-color-high,#f5f5f5);margin:14px 0 8px;
                 border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:4px}
             .ts-row{display:flex;align-items:center;gap:10px;margin-bottom:7px}
             .ts-label{width:220px;flex-shrink:0;font-size:13px;
