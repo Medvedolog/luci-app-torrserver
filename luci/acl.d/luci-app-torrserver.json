@@ -1,21 +1,10 @@
 {
   "luci-app-torrserver": {
-    "description": "Grant access for TorrServer LuCI app",
+    "description": "TorrServer LuCI app",
     "read": {
-      "ubus": {
-        "service": [ "list" ],
-        "system":  [ "info" ],
-        "log":     [ "read" ],
-        "luci":    [ "getProcessList", "setInitAction" ],
-        "file":    [ "read", "exec" ]
-      },
       "uci": [ "torrserver", "network" ]
     },
     "write": {
-      "ubus": {
-        "luci": [ "setInitAction" ],
-        "file": [ "exec" ]
-      },
       "uci": [ "torrserver" ]
     }
   }
