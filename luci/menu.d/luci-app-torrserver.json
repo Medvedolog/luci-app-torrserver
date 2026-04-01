@@ -1,11 +1,25 @@
 {
-  "luci-app-torrserver": {
-    "description": "TorrServer LuCI app",
-    "read": {
-      "uci": [ "torrserver", "network" ]
+  "admin/services/torrserver": {
+    "title": "TorrServer",
+    "order": 60,
+    "action": {
+      "type": "view",
+      "path": "torrserver/overview"
     },
-    "write": {
-      "uci": [ "torrserver" ]
+    "depends": {
+      "uci": "torrserver"
     }
+  },
+  "admin/services/torrserver/api/status": {
+    "action": { "type": "call", "handler": "torrserver", "function": "action_status" },
+    "cors": true
+  },
+  "admin/services/torrserver/api/log": {
+    "action": { "type": "call", "handler": "torrserver", "function": "action_log" },
+    "cors": true
+  },
+  "admin/services/torrserver/api/svc/:action": {
+    "action": { "type": "call", "handler": "torrserver", "function": "action_svc" },
+    "cors": true
   }
 }
