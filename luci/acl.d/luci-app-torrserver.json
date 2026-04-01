@@ -4,15 +4,17 @@
     "read": {
       "ubus": {
         "service": [ "list" ],
-        "file":    [ "read", "exec" ],
-        "luci":    [ "setInitAction" ]
+        "system":  [ "info" ],
+        "log":     [ "read" ],
+        "luci":    [ "getProcessList", "setInitAction" ],
+        "file":    [ "read", "exec" ]
       },
       "uci": [ "torrserver", "network" ]
     },
     "write": {
       "ubus": {
-        "file": [ "exec" ],
-        "luci": [ "setInitAction" ]
+        "luci": [ "setInitAction" ],
+        "file": [ "exec" ]
       },
       "uci": [ "torrserver" ]
     }
