@@ -35,7 +35,7 @@ jobs:
           } >> "${GITHUB_ENV}"
 
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Install packaging tools
         shell: bash
@@ -54,7 +54,6 @@ jobs:
           mkdir -p \
             root/usr/share/luci/menu.d \
             root/usr/share/rpcd/acl.d \
-            root/usr/share/ucode/luci/controller \
             root/www/luci-static/resources/view/torrserver \
             packaging
 
@@ -64,16 +63,12 @@ jobs:
           cp luci/acl.d/luci-app-torrserver.json \
              root/usr/share/rpcd/acl.d/luci-app-torrserver.json
 
-          cp luci/controller/torrserver.uc \
-             root/usr/share/ucode/luci/controller/torrserver.uc
-
           cp luci/view/torrserver/overview.js \
              root/www/luci-static/resources/view/torrserver/overview.js
 
           dos2unix \
             root/usr/share/luci/menu.d/luci-app-torrserver.json \
             root/usr/share/rpcd/acl.d/luci-app-torrserver.json \
-            root/usr/share/ucode/luci/controller/torrserver.uc \
             root/www/luci-static/resources/view/torrserver/overview.js
 
       - name: Create package scripts
@@ -81,24 +76,32 @@ jobs:
         run: |
           set -euxo pipefail
 
-          cat > packaging/postinstall.sh <<EOF
+          # Используем 'EOF' (одиночные кавычки) — переменные НЕ подставляются bash при генерации.
+          # Версия и имя пакета вставляются через envsubst после heredoc.
+          cat > packaging/postinstall.sh <<'SCRIPT_EOF'
           #!/bin/sh
           echo "============================================================"
-          echo " Installed ${PKG_NAME} version ${PKG_VERSION}"
+          echo " Installed PLACEHOLDER_PKG_NAME version PLACEHOLDER_PKG_VERSION"
           echo " View: /www/luci-static/resources/view/torrserver/overview.js"
           echo " Menu: /usr/share/luci/menu.d/luci-app-torrserver.json"
           echo " ACL:  /usr/share/rpcd/acl.d/luci-app-torrserver.json"
           echo " Expected daemon binary : /usr/bin/torrserver"
           echo " Expected init script   : /etc/init.d/torrserver"
           echo "============================================================"
-          [ -n "\${IPKG_INSTROOT}" ] && exit 0
+          [ -n "${IPKG_INSTROOT}" ] && exit 0
           /etc/init.d/rpcd reload  >/dev/null 2>&1 || true
           /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
           [ ! -x /usr/bin/torrserver ]    && echo "[postinstall] warning: /usr/bin/torrserver not found"
           [ ! -x /etc/init.d/torrserver ] && echo "[postinstall] warning: /etc/init.d/torrserver not found"
           echo "[postinstall] done."
           exit 0
-          EOF
+          SCRIPT_EOF
+
+          # Подставляем реальные значения через sed (не через bash-подстановку в heredoc)
+          sed -i \
+            -e "s/PLACEHOLDER_PKG_NAME/${PKG_NAME}/g" \
+            -e "s/PLACEHOLDER_PKG_VERSION/${PKG_VERSION}/g" \
+            packaging/postinstall.sh
 
           cat > packaging/preremove.sh <<'EOF'
           #!/bin/sh
@@ -150,11 +153,6 @@ jobs:
               file_info:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
-            - src: ./root/usr/share/ucode/luci/controller/torrserver.uc
-              dst: /usr/share/ucode/luci/controller/torrserver.uc
-              file_info:
-                mode: 0644
-                mtime: 2024-01-01T00:00:00Z
             - src: ./root/www/luci-static/resources/view/torrserver/overview.js
               dst: /www/luci-static/resources/view/torrserver/overview.js
               file_info:
@@ -194,10 +192,6 @@ jobs:
               dst: /usr/share/rpcd/acl.d/luci-app-torrserver.json
               file_info:
                 mode: 0644
-            - src: ./root/usr/share/ucode/luci/controller/torrserver.uc
-              dst: /usr/share/ucode/luci/controller/torrserver.uc
-              file_info:
-                mode: 0644
             - src: ./root/www/luci-static/resources/view/torrserver/overview.js
               dst: /www/luci-static/resources/view/torrserver/overview.js
               file_info:
@@ -212,47 +206,21 @@ jobs:
             --target "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH_APK}.apk"
           test -f "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH_APK}.apk"
 
-      - name: Generate Packages index for opkg feed
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # Packages.gz позволяет добавить GitHub Release как opkg feed.
-          # После этого пакет виден в LuCI Package Manager.
-          for ipk in *.ipk; do
-            ar x "${ipk}" control.tar.gz 2>/dev/null || true
-            if [ -f control.tar.gz ]; then
-              tar -xzf control.tar.gz ./control 2>/dev/null ||               tar -xzf control.tar.gz control    2>/dev/null || true
-              rm -f control.tar.gz
-            fi
-            if [ -f control ]; then
-              cat control
-              printf "Filename: %s\n" "${ipk}"
-              printf "Size: %s\n"     "$(stat -c%s "${ipk}")"
-              printf "SHA256sum: %s\n" "$(sha256sum "${ipk}" | cut -d' ' -f1)"
-              printf "\n"
-              rm -f control
-            fi
-          done > Packages
-          gzip -k Packages
-          echo "=== Packages ===" && cat Packages
-
       - name: Generate checksums
         shell: bash
         run: |
           set -euxo pipefail
-          sha256sum *.ipk *.apk Packages Packages.gz > SHA256SUMS.txt
+          sha256sum *.ipk *.apk > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: luci-app-torrserver-${{ env.PKG_VERSION }}
           if-no-files-found: error
           path: |
             *.ipk
             *.apk
-            Packages
-            Packages.gz
             SHA256SUMS.txt
 
       - name: Create or update GitHub Release
@@ -260,25 +228,9 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name:     ${{ env.RELEASE_NAME }}
-          body: |
-            ## Установка
-
-            ### Через opkg напрямую
-            ```
-            opkg install https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/luci-app-torrserver_${{ env.PKG_VERSION }}_all.ipk
-            ```
-
-            ### Как постоянный feed (виден в LuCI Package Manager)
-            Добавить в `/etc/opkg/customfeeds.conf`:
-            ```
-            src/gz luci-torrserver https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}
-            ```
-            Затем `opkg update && opkg install luci-app-torrserver`
           files: |
             *.ipk
             *.apk
-            Packages
-            Packages.gz
             SHA256SUMS.txt
           draft:      false
           prerelease: false
