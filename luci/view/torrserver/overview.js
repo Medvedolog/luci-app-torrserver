@@ -5,211 +5,363 @@
 'require fs';
 'require ui';
 'require poll';
-'require request';
 
 /*
- * luci-app-torrserver — overview.js  v7
+ * luci-app-torrserver — overview.js
  *
- * Метрики (RAM, CPU, cores, pid) — с сервера через /api/status (ucode).
- * Сервер читает /proc напрямую в Lua/ucode — никаких ограничений rpcd.
- * Лог — /api/log (popen logread -e torrserver на сервере).
- * Управление — /api/svc/<action> (system() на сервере).
- * JS только рисует полученные данные.
+ * Современный LuCI View (OpenWrt 23.05+).
+ * Не использует CBI, Lua, luci-compat.
+ * Управление сервисом — через file.exec (rpcd).
+ * Статус  — через ubus service list.
+ * Настройки UCI — через uci API LuCI.
+ * Лог — через file.exec logread / file.read (если logpath задан).
  */
 
-/* базовый URL для API — строится относительно текущего пути LuCI */
-const API_BASE = L.url('admin', 'services', 'torrserver', 'api');
+/* ── rpcd-вызовы ── */
 
-function apiGet(endpoint) {
-    return request.get(API_BASE + '/' + endpoint).then(function(res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res;
+const callServiceList = rpc.declare({
+    object: 'service',
+    method: 'list',
+    params: [ 'name' ],
+    expect: { '': {} }
+});
+
+const callFileExec = rpc.declare({
+    object: 'file',
+    method: 'exec',
+    params: [ 'command', 'args' ],
+    expect: { '': {} }
+});
+
+const callFileRead = rpc.declare({
+    object: 'file',
+    method: 'read',
+    params: [ 'path' ],
+    expect: { data: '' }
+});
+
+/* ── хелперы ── */
+
+function svcAction(action) {
+    return callFileExec('/etc/init.d/torrserver', [ action ]);
+}
+
+function getPid() {
+    return callFileExec('/bin/pidof', [ 'torrserver' ])
+        .then(function(r) {
+            const out = (r && r.stdout) ? r.stdout.trim().split(/\s+/)[0] : '';
+            return out || null;
+        });
+}
+
+function getMemKb(pid) {
+    if (!pid) return Promise.resolve(0);
+    return callFileRead('/proc/' + pid + '/status').then(function(r) {
+        const m = (r || '').match(/VmRSS:\s+(\d+)/);
+        return m ? parseInt(m[1]) : 0;
     });
 }
 
-function apiJson(endpoint) {
-    return apiGet(endpoint).then(function(res) { return res.json(); });
+function getSysMem() {
+    return callFileRead('/proc/meminfo').then(function(r) {
+        const lines = (r || '').split('\n');
+        let total = 0, avail = 0, free = 0;
+        lines.forEach(function(l) {
+            const m = l.match(/^(\w+):\s+(\d+)/);
+            if (!m) return;
+            if (m[1] === 'MemTotal')     total = parseInt(m[2]);
+            if (m[1] === 'MemAvailable') avail = parseInt(m[2]);
+            if (m[1] === 'MemFree')      free  = parseInt(m[2]);
+        });
+        return { total: total, available: avail || free };
+    });
 }
 
-function apiText(endpoint) {
-    return apiGet(endpoint).then(function(res) { return res.text(); });
+/*
+ * getCpuStat — возвращает { cores: [...%], raw: {cpu0:{total,work},...} }
+ * raw передаётся в getProcCpu, чтобы не читать /proc/stat дважды за тик.
+ */
+let _prevStat = null;
+
+function getCpuStat() {
+    return callFileRead('/proc/stat').then(function(r) {
+        const lines = (r || '').split('\n');
+        const cur = {};
+        let cpuCount = 0;
+        lines.forEach(function(l) {
+            const m = l.match(/^(cpu\d*)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+            if (!m) return;
+            const u = +m[2], n = +m[3], s = +m[4], i = +m[5];
+            cur[m[1]] = { total: u + n + s + i, work: u + n + s };
+            if (m[1] !== 'cpu') cpuCount++;
+        });
+
+        /* динамический список ядер из /proc/stat */
+        const cores = [];
+        for (let i = 0; i < cpuCount; i++) {
+            const k = 'cpu' + i;
+            let pct = 0;
+            if (cur[k] && _prevStat && _prevStat[k]) {
+                const dt = cur[k].total - _prevStat[k].total;
+                const dw = cur[k].work  - _prevStat[k].work;
+                if (dt > 0) pct = Math.round((dw / dt) * 100);
+            }
+            cores.push(pct);
+        }
+        _prevStat = cur;
+        /* возвращаем и проценты ядер, и сырые данные для getProcCpu */
+        return { cores: cores, raw: cur };
+    });
+}
+
+/*
+ * getProcCpu — принимает готовые raw-данные /proc/stat, не делает лишний RPC.
+ */
+let _prevProcStat = null;
+
+function getProcCpu(pid, rawStat) {
+    if (!pid) return Promise.resolve('0');
+    return callFileRead('/proc/' + pid + '/stat').then(function(pstatStr) {
+        const pstat    = (pstatStr || '').split(/\s+/);
+        const utime    = parseInt(pstat[13]) || 0;
+        const stime    = parseInt(pstat[14]) || 0;
+        const procTotal = utime + stime;
+
+        const cpuAll  = rawStat && rawStat['cpu'];
+        const sysTotal = cpuAll ? cpuAll.total : 0;
+
+        /* считаем кол-во ядер из rawStat */
+        let cpuCount = 0;
+        if (rawStat) {
+            Object.keys(rawStat).forEach(function(k) {
+                if (/^cpu\d+$/.test(k)) cpuCount++;
+            });
+        }
+        if (cpuCount < 1) cpuCount = 1;
+
+        if (!_prevProcStat) {
+            _prevProcStat = { proc: procTotal, sys: sysTotal };
+            return '0';
+        }
+        const dp = procTotal - _prevProcStat.proc;
+        const ds = sysTotal  - _prevProcStat.sys;
+        _prevProcStat = { proc: procTotal, sys: sysTotal };
+        return ds > 0 ? (Math.min((dp / ds) * 100 * cpuCount, 100)).toFixed(1) : '0';
+    });
+}
+
+function getLog() {
+    /* если задан logpath в UCI — читаем файл, иначе logread */
+    const logpath = uci.get('torrserver', 'main', 'logpath') || '';
+    if (logpath) {
+        return callFileRead(logpath).then(function(r) {
+            if (!r) return '';
+            const lines = r.split('\n');
+            return lines.slice(-200).join('\n');
+        });
+    }
+    return callFileExec('/sbin/logread', [ '-e', 'torrserver' ])
+        .then(function(r) {
+            const out = (r && r.stdout) ? r.stdout : '';
+            const lines = out.split('\n');
+            return lines.slice(-200).join('\n');
+        });
+}
+
+function getLanIp() {
+    return uci.load('network').then(function() {
+        /* пробуем ipaddr напрямую; на bridge-конфигурациях может быть пусто */
+        const ip = uci.get('network', 'lan', 'ipaddr');
+        return ip || '192.168.1.1';
+    });
 }
 
 /* ── View ── */
+
 return view.extend({
 
+    _pollTimer: null,
+
+    /* Данные загружаемые при открытии страницы */
     load: function() {
         return Promise.all([
             uci.load('torrserver'),
-            uci.load('network')
+            getLanIp(),
+            callFileExec('/bin/ls', [ '/usr/bin/torrserver' ]),
+            callFileExec('/bin/ls', [ '/etc/init.d/torrserver' ])
         ]);
     },
 
-    render: function() {
-        const lanIp  = uci.get('network', 'lan', 'ipaddr') || '192.168.1.1';
-        const port   = uci.get('torrserver', 'main', 'port') || '8090';
-        const webUrl = 'http://' + lanIp + ':' + port;
+    /* вызывается LuCI при уходе со страницы — останавливаем поллинг */
+    remove: function() {
+        if (this._pollTimer) {
+            clearTimeout(this._pollTimer);
+            this._pollTimer = null;
+        }
+    },
 
+    /* ── рендер ── */
+    render: function(data) {
+        const self       = this;
+        const lanIp      = data[1] || '192.168.1.1';
+        const binOk      = data[2] && data[2].code === 0;
+        const initOk     = data[3] && data[3].code === 0;
+        const port       = uci.get('torrserver', 'main', 'port') || '8090';
+        const webUrl     = 'http://' + lanIp + ':' + port;
+
+        /* ── корневой DOM ── */
         const root = E('div', { class: 'ts-root' });
-        root.appendChild(this._renderStyles());
 
-        /* placeholder для предупреждения — заполняется первым tick() */
-        const warnEl = E('div', { id: 'ts-warn' });
-        root.appendChild(warnEl);
+        /* предупреждение */
+        if (!binOk || !initOk) {
+            root.appendChild(E('div', { class: 'ts-warn' }, [
+                E('strong', {}, 'Нужен daemon TorrServer.'),
+                E('br'), E('br'),
+                E('span', {}, '/usr/bin/torrserver: '),
+                E('b', {}, binOk  ? '✓ OK' : '✗ MISSING'),
+                E('br'),
+                E('span', {}, '/etc/init.d/torrserver: '),
+                E('b', {}, initOk ? '✓ OK' : '✗ MISSING')
+            ]));
+        }
 
-        /* ── карточки ── */
+        /* ── карточки мониторинга ── */
         const wrap = E('div', { class: 'ts-wrap' });
 
-        const statusEl = E('div',   { id: 'ts-status', class: 'ts-val' }, '...');
-        const pidEl    = E('small', { id: 'ts-pid',    class: 'ts-pid' }, '');
-        const ctrlEl   = E('div',   { id: 'ts-ctrl',   class: 'ts-ctrl' });
+        /* карточка: статус + кнопки */
+        const statusVal  = E('div',  { id: 'ts-status',  class: 'ts-val' }, '...');
+        const pidVal     = E('small',{ id: 'ts-pid',     class: 'ts-pid' }, '');
+        const ctrlPanel  = E('div',  { id: 'ts-ctrl',    class: 'ts-ctrl' });
+        const openBtn    = E('button', {
+            class: 'cbi-button cbi-button-neutral ts-webui-btn',
+            click: function() { window.open(webUrl, '_blank'); }
+        }, '↗ Web UI');
+
         wrap.appendChild(E('div', { class: 'ts-card ts-card-status' }, [
-            E('div', { class: 'ts-head' }, 'СЕРВИС'), statusEl, pidEl, ctrlEl
+            E('div', { class: 'ts-head' }, 'Сервис'),
+            statusVal, pidVal, ctrlPanel, openBtn
         ]));
 
-        const memEl = E('span', { id: 'ts-mem' }, '0.0');
-        const barEl = E('div',  { id: 'ts-mem-bar', class: 'ts-bar-fill' });
-        const detEl = E('div',  { id: 'ts-mem-det', class: 'ts-sub' }, 'Free: — | Total: —');
+        /* карточка: RAM */
+        const memVal     = E('span', { id: 'ts-mem' }, '0');
+        const memBar     = E('div',  { id: 'ts-mem-bar', class: 'ts-bar-fill' });
+        const memDetails = E('div',  { id: 'ts-mem-det', class: 'ts-sub' }, 'Free: — | Total: —');
         wrap.appendChild(E('div', { class: 'ts-card ts-card-wide' }, [
             E('div', { class: 'ts-head' }, 'RAM'),
-            E('div', {}, [memEl, E('span', { class: 'ts-unit' }, ' MB (TS)')]),
-            E('div', { class: 'ts-bar-bg' }, [barEl]),
-            detEl
+            E('div', {}, [ memVal, E('span', { class: 'ts-unit' }, ' MB (TS)') ]),
+            E('div', { class: 'ts-bar-bg' }, [ memBar ]),
+            memDetails
         ]));
 
-        const cpuEl = E('span', { id: 'ts-cpu' }, '0.0');
+        /* карточка: CPU процесса */
+        const cpuVal = E('span', { id: 'ts-cpu' }, '0');
         wrap.appendChild(E('div', { class: 'ts-card' }, [
             E('div', { class: 'ts-head' }, 'CPU (TS)'),
-            E('div', { class: 'ts-val' }, [cpuEl, E('span', { class: 'ts-unit' }, '%')]),
+            E('div', { class: 'ts-val' }, [ cpuVal, E('span', { class: 'ts-unit' }, '%') ]),
             E('div', { class: 'ts-sub' }, 'нагрузка процесса')
         ]));
 
-        const coreEls = [0,1,2,3].map(function(i) {
-            return E('div', { class: 'ts-core-col' }, [
-                E('div', { class: 'ts-core-track' }, [E('div', { id: 'ts-c'+i, class: 'ts-core-fill' })]),
-                E('div', { class: 'ts-core-num' }, String(i))
-            ]);
-        });
-        const coresTxtEl = E('div', { id: 'ts-cores-txt', class: 'ts-sub' }, '0%|0%|0%|0%');
+        /* карточка: ядра — количество определяется динамически при первом тике */
+        const coresWrap = E('div', { id: 'ts-cores-grid', class: 'ts-cores-grid' });
+        const coresTxt  = E('div', { id: 'ts-cores-txt',  class: 'ts-sub' }, '...');
         wrap.appendChild(E('div', { class: 'ts-card' }, [
-            E('div', { class: 'ts-head' }, 'CORES'),
-            E('div', { class: 'ts-cores-grid' }, coreEls),
-            coresTxtEl
+            E('div', { class: 'ts-head' }, 'Cores'),
+            coresWrap,
+            coresTxt
         ]));
 
         root.appendChild(wrap);
 
         /* ── лог ── */
         let logVisible = false;
-        const logBox = E('pre', { id: 'ts-log', class: 'ts-log' });
+        const logBox = E('div', { id: 'ts-log', class: 'ts-log' }, 'Загрузка...');
         logBox.style.display = 'none';
-
-        function doRefreshLog() {
-            logBox.textContent = 'Загрузка...';
-            apiText('log').then(function(text) {
-                logBox.textContent = text || 'Нет событий torrserver в логе.';
-                logBox.scrollTop = logBox.scrollHeight;
-            }).catch(function(e) {
-                logBox.textContent = '[error] ' + e;
-            });
-        }
-
         const logBtn = E('button', {
             class: 'cbi-button cbi-button-neutral',
+            style: 'margin-top:10px',
             click: function() {
                 logVisible = !logVisible;
-                logBox.style.display     = logVisible ? 'block' : 'none';
-                logBtn.textContent       = logVisible ? '▲ Скрыть лог' : '▼ Показать лог';
-                refreshBtn.style.display = logVisible ? '' : 'none';
-                copyBtn.style.display    = logVisible ? '' : 'none';
-                if (logVisible) doRefreshLog();
+                logBox.style.display = logVisible ? 'block' : 'none';
+                logBtn.textContent = logVisible ? '▲ Скрыть лог' : '▼ Показать лог';
+                if (logVisible) refreshLog();
             }
         }, '▼ Показать лог');
-
-        const refreshBtn = E('button', {
-            class: 'cbi-button cbi-button-neutral', style: 'display:none',
-            click: doRefreshLog
-        }, '↻ Обновить лог');
-
-        const copyBtn = E('button', {
-            class: 'cbi-button cbi-button-neutral', style: 'display:none',
-            click: function() {
-                if (!navigator.clipboard) return;
-                navigator.clipboard.writeText(logBox.textContent).then(function() {
-                    const orig = copyBtn.textContent;
-                    copyBtn.textContent = '✓ Скопировано';
-                    setTimeout(function() { copyBtn.textContent = orig; }, 1500);
-                });
-            }
-        }, '⎘ Копировать лог');
-
-        root.appendChild(E('div', { class: 'ts-log-bar' }, [logBtn, refreshBtn, copyBtn]));
+        root.appendChild(logBtn);
         root.appendChild(logBox);
 
-        /* ── Web UI + настройки ── */
-        root.appendChild(E('hr', { class: 'ts-hr' }));
-        root.appendChild(E('div', { style: 'margin-bottom:12px' }, [
-            E('button', {
-                class: 'cbi-button cbi-button-neutral',
-                click: function() { window.open(webUrl, '_blank'); }
-            }, '↗ Открыть TorrServer Web UI  (' + webUrl + ')')
-        ]));
-        root.appendChild(this._renderSettings());
+        /* ── настройки UCI ── */
+        root.appendChild(E('hr', { style: 'margin:20px 0;border-color:rgba(255,255,255,.1)' }));
+        root.appendChild(self._renderSettings());
 
-        /* ── state ── */
+        /* ── CSS ── */
+        root.insertBefore(self._renderStyles(), root.firstChild);
+
+        /* ── polling ── */
         let pendingAction = null;
-        let prevPid       = null;
-        let lastState     = null;
-        let canCtrl       = false;
+        let fastUntil     = 0;
+        /* отслеживаем количество ядер между тиками */
+        let _renderedCoreCount = 0;
 
-        function colorPct(p) { return p > 80 ? '#f44336' : p > 50 ? '#ff9800' : '#4caf50'; }
+        function delay() {
+            return (Date.now() / 1000 < fastUntil) ? 1500 : 4000;
+        }
 
-        function setBarH(id, pct) {
-            const e = document.getElementById(id); if (!e) return;
+        function colorPct(p) {
+            return p > 80 ? '#f44336' : p > 50 ? '#ff9800' : '#4caf50';
+        }
+
+        /* строим/перестраиваем колонки ядер только если их количество изменилось */
+        function ensureCoreColumns(count) {
+            if (count === _renderedCoreCount) return;
+            _renderedCoreCount = count;
+            while (coresWrap.firstChild) coresWrap.removeChild(coresWrap.firstChild);
+            for (let i = 0; i < count; i++) {
+                coresWrap.appendChild(E('div', { class: 'ts-core-col' }, [
+                    E('div', { class: 'ts-core-track' }, [
+                        E('div', { id: 'ts-c' + i, class: 'ts-core-fill' })
+                    ]),
+                    E('div', { class: 'ts-core-num' }, String(i))
+                ]));
+            }
+        }
+
+        function setBar(id, pct) {
+            const e = document.getElementById(id);
+            if (!e) return;
             const h = Math.min(Math.max(Math.round(pct), 0), 100);
             e.style.height = h + '%';
             e.style.backgroundColor = colorPct(h);
         }
 
-        function renderCtrl(running) {
-            const p = document.getElementById('ts-ctrl'); if (!p) return;
+        function renderCtrl(running, canCtrl) {
+            const p = document.getElementById('ts-ctrl');
+            if (!p) return;
+            while (p.firstChild) p.removeChild(p.firstChild);
 
             if (!canCtrl) {
-                if (lastState !== 'no-daemon') {
-                    lastState = 'no-daemon'; p.innerHTML = '';
-                    p.appendChild(E('button', {
-                        class: 'cbi-button ts-btn-disabled', disabled: true
-                    }, 'daemon missing'));
-                }
+                p.appendChild(E('button', {
+                    class: 'cbi-button ts-btn-disabled', disabled: true
+                }, 'daemon missing'));
                 return;
             }
 
-            const newState = running ? 'running' : 'stopped';
-            if (pendingAction)          return;
-            if (lastState === newState) return;
-            lastState = newState;
-            p.innerHTML = '';
-
             function mkBtn(label, cls, action) {
-                const btn = E('button', {
+                return E('button', {
                     class: 'cbi-button ts-btn-' + cls,
                     click: function() {
-                        if (pendingAction) return;
                         pendingAction = action;
-                        prevPid = (document.getElementById('ts-pid').textContent.match(/\d+/) || [null])[0];
-                        btn.textContent = action === 'start'   ? 'Starting...' :
-                                          action === 'stop'    ? 'Stopping...' : 'Restarting...';
-                        btn.disabled = true;
-                        btn.classList.add('ts-btn-busy');
-                        poll.start(1.5);
-                        apiJson('svc/' + action).catch(function(e) {
-                            console.error('[ts] svc', action, e);
-                            pendingAction = null; lastState = null;
+                        fastUntil = Date.now() / 1000 + 15;
+                        this.textContent = label === 'Start'   ? 'Starting...'
+                                         : label === 'Stop'    ? 'Stopping...'
+                                         :                        'Restarting...';
+                        this.disabled = true;
+                        svcAction(action).then(function() {
+                            setTimeout(tick, 800);
+                            setTimeout(tick, 1800);
+                            setTimeout(tick, 3000);
                         });
-                        setTimeout(function() { if (!pendingAction) poll.start(5); }, 20000);
                     }
                 }, label);
-                return btn;
             }
 
             if (running) {
@@ -220,276 +372,364 @@ return view.extend({
             }
         }
 
-        /* ── главный tick — получает готовый JSON с сервера ── */
-        function doTick() {
-            return apiJson('status').then(function(d) {
-                if (!d) return;
+        function tick() {
+            Promise.all([
+                callServiceList('torrserver'),
+                getSysMem(),
+                getCpuStat(),   /* возвращает { cores, raw } */
+            ]).then(function(res) {
+                const svcData  = res[0];
+                const sysMem   = res[1];
+                const cpuData  = res[2];    /* { cores: [...], raw: {...} } */
+                const cores    = cpuData.cores;
+                const rawStat  = cpuData.raw;
 
-                canCtrl = d.bin_present && d.init_present;
+                /* статус через procd service list */
+                const inst = svcData && svcData.torrserver
+                                && svcData.torrserver.instances;
+                const running = inst
+                                ? Object.values(inst).some(function(i) { return i.running; })
+                                : false;
+                const pidFromSvc = inst
+                                ? (Object.values(inst)[0] || {}).pid || null
+                                : null;
+                const pid = pidFromSvc ? String(pidFromSvc) : null;
 
-                /* предупреждение */
-                const w = document.getElementById('ts-warn');
-                if (w) {
-                    if (!canCtrl) {
-                        w.innerHTML =
-                            '<div class="ts-warn">' +
-                            '<strong>Нужен daemon TorrServer.</strong><br><br>' +
-                            '/usr/bin/torrserver: <b style="color:' + (d.bin_present  ? '#4caf50' : '#f44336') + '">' + (d.bin_present  ? '✓ OK' : '✗ MISSING') + '</b><br>' +
-                            '/etc/init.d/torrserver: <b style="color:' + (d.init_present ? '#4caf50' : '#f44336') + '">' + (d.init_present ? '✓ OK' : '✗ MISSING') + '</b>' +
-                            '</div>';
-                    } else {
-                        w.innerHTML = '';
-                    }
-                }
+                const st    = document.getElementById('ts-status');
+                const pEl   = document.getElementById('ts-pid');
+                const canCtrl = binOk && initOk;
 
-                /* pendingAction сброс */
-                if (pendingAction === 'stop'    && !d.running) { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
-                if (pendingAction === 'start'   &&  d.running) { pendingAction = null; lastState = null; prevPid = null; poll.start(5); }
-                if (pendingAction === 'restart' &&  d.running && d.pid && d.pid !== prevPid) {
-                    pendingAction = null; lastState = null; prevPid = null; poll.start(5);
-                }
-
-                /* статус */
-                const st  = document.getElementById('ts-status');
-                const pEl = document.getElementById('ts-pid');
                 if (!canCtrl) {
                     if (st) st.innerHTML = '<span style="color:#ffb74d">NO DAEMON</span>';
-                    renderCtrl(false); return;
+                    renderCtrl(false, false);
+                    return;
                 }
-                if (d.running) {
-                    if (st)  st.innerHTML = '<span style="color:#4caf50">ЗАПУЩЕН</span>';
-                    if (pEl) pEl.textContent = d.pid ? 'PID ' + d.pid : '';
+
+                if (running) {
+                    if (st) st.innerHTML = '<span style="color:#4caf50">ЗАПУЩЕН</span>';
+                    if (pEl) pEl.textContent = pid ? 'PID ' + pid : '';
+                    if (pendingAction === 'start' || pendingAction === 'restart') pendingAction = null;
                 } else {
-                    if (pEl) pEl.textContent = '';
-                    if (st) {
-                        if      (pendingAction === 'stop')    st.innerHTML = '<span style="color:#ff9800">STOPPING...</span>';
-                        else if (pendingAction === 'restart') st.innerHTML = '<span style="color:#ff9800">RESTARTING...</span>';
-                        else if (pendingAction === 'start')   st.innerHTML = '<span style="color:#ff9800">STARTING...</span>';
-                        else                                  st.innerHTML = '<span style="color:#f44336">ОСТАНОВЛЕН</span>';
+                    if (pendingAction === 'stop') {
+                        if (st) st.innerHTML = '<span style="color:#ff9800">STOPPING...</span>';
+                    } else if (pendingAction) {
+                        if (st) st.innerHTML = '<span style="color:#ff9800">STARTING...</span>';
+                    } else {
+                        if (st) st.innerHTML = '<span style="color:#f44336">ОСТАНОВЛЕН</span>';
+                        if (pEl) pEl.textContent = '';
                     }
+                    if (pendingAction === 'stop') pendingAction = null;
                 }
-                renderCtrl(d.running);
 
-                /* RAM процесса: сервер отдаёт mem_kb (из VmRSS /proc/<pid>/status) */
-                const mEl = document.getElementById('ts-mem');
-                const bEl = document.getElementById('ts-mem-bar');
-                const dEl = document.getElementById('ts-mem-det');
-                const cEl = document.getElementById('ts-cpu');
+                renderCtrl(running, canCtrl);
 
-                if (d.running && d.mem_kb) {
-                    if (mEl) mEl.textContent = (d.mem_kb / 1024).toFixed(1);
-                    if (cEl) cEl.textContent = d.ts_cpu;
-                    if (bEl && d.sys_mem && d.sys_mem.total > 0) {
-                        const pct = Math.max((d.mem_kb / d.sys_mem.total) * 100, 1);
-                        bEl.style.width = pct + '%';
-                        bEl.style.backgroundColor = colorPct(pct);
+                /* RAM */
+                getMemKb(pid).then(function(kb) {
+                    const memEl = document.getElementById('ts-mem');
+                    const barEl = document.getElementById('ts-mem-bar');
+                    const detEl = document.getElementById('ts-mem-det');
+                    if (memEl) memEl.textContent = running ? (kb / 1024).toFixed(1) : '0';
+                    if (detEl && sysMem.total > 0) {
+                        detEl.textContent =
+                            'Free: '  + (sysMem.available / 1024).toFixed(0) +
+                            ' MB | Total: ' + (sysMem.total / 1024).toFixed(0) + ' MB';
                     }
-                } else {
-                    if (mEl) mEl.textContent = '0.0';
-                    if (cEl) cEl.textContent = '0.0';
-                    if (bEl) { bEl.style.width = '0%'; bEl.style.backgroundColor = '#2196F3'; }
-                }
+                    if (barEl) {
+                        barEl.style.width = (running && sysMem.total > 0)
+                            ? Math.max((kb / sysMem.total) * 100, 1) + '%'
+                            : '0%';
+                    }
+                });
 
-                /* системная RAM */
-                if (dEl && d.sys_mem && d.sys_mem.total > 0) {
-                    const freeMb  = Math.round(d.sys_mem.available / 1024);
-                    const totalMb = Math.round(d.sys_mem.total      / 1024);
-                    dEl.textContent = 'Free: ' + freeMb + ' MB | Total: ' + totalMb + ' MB';
-                }
+                /* CPU процесса — передаём rawStat, избегаем второго чтения /proc/stat */
+                getProcCpu(pid, rawStat).then(function(pct) {
+                    const el = document.getElementById('ts-cpu');
+                    if (el) el.textContent = running ? pct : '0';
+                });
 
-                /* per-core CPU — сервер отдаёт delta между тиками */
-                const ctEl = document.getElementById('ts-cores-txt');
-                if (d.cores && d.cores.length) {
-                    const labels = d.cores.map(function(v, i) {
-                        setBarH('ts-c' + i, v);
-                        return Math.round(v) + '%';
-                    });
-                    if (ctEl) ctEl.textContent = labels.join(' | ');
-                }
-
-            }).catch(function(e) {
-                console.error('[ts] tick:', e);
+                /* ядра — динамически */
+                ensureCoreColumns(cores.length);
+                const txt = cores.map(function(v, i) {
+                    setBar('ts-c' + i, v);
+                    return Math.round(v) + '%';
+                });
+                const ct = document.getElementById('ts-cores-txt');
+                if (ct) ct.textContent = cores.length ? txt.join(' | ') : '—';
             });
         }
 
-        poll.add(doTick, 5);
+        function refreshLog() {
+            getLog().then(function(text) {
+                const el = document.getElementById('ts-log');
+                if (!el) return;
+                el.textContent = text || 'Лог пуст.';
+                el.scrollTop = el.scrollHeight;
+            });
+        }
+
+        function schedulePoll() {
+            self._pollTimer = setTimeout(function() {
+                tick();
+                schedulePoll();
+            }, delay());
+        }
+
+        tick();
+        schedulePoll();
+
         return root;
     },
 
     /* ── UCI настройки ── */
     _renderSettings: function() {
+        const self = this;
         const wrap = E('div', { class: 'ts-settings' });
 
-        function row(label, field) {
+        function row(label, el) {
             return E('div', { class: 'ts-row' }, [
                 E('label', { class: 'ts-label' }, label),
-                E('div',   { class: 'ts-field' }, [field])
+                E('div',   { class: 'ts-field' }, [ el ])
             ]);
         }
-        function inp(opt, ph, type) {
-            const v = uci.get('torrserver', 'main', opt) || '';
-            return E('input', { class: 'cbi-input-text', type: type || 'text',
-                value: v, placeholder: ph || '',
+
+        function inp(opt, placeholder, type, min, max) {
+            const val = uci.get('torrserver', 'main', opt) || '';
+            const attrs = {
+                class: 'cbi-input-text',
+                type: type || 'text',
+                value: val,
+                placeholder: placeholder || '',
                 input: function() { uci.set('torrserver', 'main', opt, this.value); }
-            });
-        }
-        function chk(opt, def) {
-            const raw = uci.get('torrserver', 'main', opt);
-            const checked = raw != null ? raw === '1' : def === '1';
-            const attrs = { type: 'checkbox', class: 'ts-chk',
-                change: function() { uci.set('torrserver', 'main', opt, this.checked ? '1' : '0'); }
             };
-            if (checked) attrs.checked = 'checked';
+            if (min !== undefined) attrs.min = String(min);
+            if (max !== undefined) attrs.max = String(max);
             return E('input', attrs);
         }
-        function sel(opt, opts, def) {
+
+        function chk(opt, def) {
+            const val = uci.get('torrserver', 'main', opt);
+            const checked = (val !== undefined) ? (val === '1') : (def === '1');
+            return E('input', {
+                type: 'checkbox',
+                checked: checked,
+                class: 'ts-chk',
+                change: function() { uci.set('torrserver', 'main', opt, this.checked ? '1' : '0'); }
+            });
+        }
+
+        function sel(opt, options, def) {
             const cur = uci.get('torrserver', 'main', opt) || def;
-            return E('select', { class: 'cbi-input-select',
+            return E('select', {
+                class: 'cbi-input-select',
                 change: function() { uci.set('torrserver', 'main', opt, this.value); }
-            }, opts.map(function(o) {
-                const a = { value: o }; if (o === cur) a.selected = 'selected';
-                return E('option', a, o);
+            }, options.map(function(o) {
+                return E('option', { value: o, selected: o === cur }, o);
             }));
         }
 
+        /* ── Основные ── */
         wrap.appendChild(E('h3', { class: 'ts-section-title' }, 'Основные настройки'));
-        wrap.appendChild(row('Автозапуск',         chk('enabled',   '1')));
-        wrap.appendChild(row('Порт',               inp('port',      '8090', 'number')));
-        wrap.appendChild(row('Рабочая директория', inp('path',      '/opt/torrserver')));
-        wrap.appendChild(row('Режим прокси',       sel('proxymode', ['tracker','all','off'], 'tracker')));
+        wrap.appendChild(row('Автозапуск',           chk('enabled', '1')));
+        /* порт: number с валидацией диапазона 1–65535 */
+        wrap.appendChild(row('Порт',                  inp('port', '8090', 'number', 1, 65535)));
+        wrap.appendChild(row('Рабочая директория',     inp('path', '/opt/torrserver')));
+        wrap.appendChild(row('Режим прокси',           sel('proxymode', ['tracker','all','off'], 'tracker')));
 
-        const advBody = E('div', { style: 'display:none' });
-        [
-            ['IP для bind',         'ip',          '0.0.0.0',                 'inp'],
-            ['--dontkill',          'dontkill',    '1',                       'chk'],
-            ['HTTP auth',           'httpauth',    '0',                       'chk'],
-            ['RDB режим',           'rdb',         '0',                       'chk'],
-            ['Путь к логу',         'logpath',     '/tmp/torrserver.log',     'inp'],
-            ['Путь к web-логу',     'weblogpath',  '/tmp/torrserver-web.log', 'inp'],
-            ['Каталог torrents',    'torrentsdir', '/opt/torrserver/torrents','inp'],
-            ['Torrent listen addr', 'torrentaddr', 'example.com:6881',        'inp'],
-            ['Публичный IPv4',      'pubipv4',     '',                        'inp'],
-            ['Публичный IPv6',      'pubipv6',     '',                        'inp'],
-            ['Web/API поиск',       'searchwa',    '0',                       'chk'],
-            ['Макс. размер',        'maxsize',     '64M',                     'inp'],
-            ['Telegram',            'tg',          '',                        'inp'],
-            ['FUSE',                'fuse',        '',                        'inp'],
-            ['WebDAV',              'webdav',      '0',                       'chk'],
-            ['Proxy URL',           'proxyurl',    'http://127.0.0.1:8080',  'inp']
-        ].forEach(function(r) {
-            advBody.appendChild(row(r[0], r[3] === 'chk' ? chk(r[1],r[2]) : inp(r[1],r[2])));
-        });
-
-        let advOpen = false;
+        /* ── Дополнительные ── */
         const advTitle = E('h3', {
-            class: 'ts-section-title', style: 'cursor:pointer;user-select:none',
+            class: 'ts-section-title ts-adv-toggle',
+            style: 'cursor:pointer',
             click: function() {
-                advOpen = !advOpen;
-                advBody.style.display = advOpen ? '' : 'none';
-                advTitle.textContent  = (advOpen ? '▼' : '▶') + ' Дополнительные настройки';
+                advBody.style.display = advBody.style.display === 'none' ? '' : 'none';
+                this.textContent = advBody.style.display === 'none'
+                    ? '▶ Дополнительные настройки'
+                    : '▼ Дополнительные настройки';
             }
         }, '▶ Дополнительные настройки');
 
+        const advBody = E('div', { style: 'display:none' });
+        advBody.appendChild(row('IP для bind',                      inp('ip', '0.0.0.0')));
+        advBody.appendChild(row('--dontkill',                       chk('dontkill', '1')));
+        advBody.appendChild(row('HTTP auth',                        chk('httpauth', '0')));
+        advBody.appendChild(row('RDB режим',                        chk('rdb', '0')));
+        advBody.appendChild(row('Путь к логу',                      inp('logpath', '/tmp/torrserver.log')));
+        advBody.appendChild(row('Путь к web-логу',                  inp('weblogpath', '/tmp/torrserver-web.log')));
+        advBody.appendChild(row('Каталог torrents',                  inp('torrentsdir', '/opt/torrserver/torrents')));
+        advBody.appendChild(row('Torrent listen addr',               inp('torrentaddr', 'example.com:6881')));
+        advBody.appendChild(row('Публичный IPv4',                   inp('pubipv4', '')));
+        advBody.appendChild(row('Публичный IPv6',                   inp('pubipv6', '')));
+        advBody.appendChild(row('Web/API поиск',                    chk('searchwa', '0')));
+        advBody.appendChild(row('Макс. размер',                     inp('maxsize', '64M')));
+        advBody.appendChild(row('Telegram',                         inp('tg', '')));
+        advBody.appendChild(row('FUSE',                             inp('fuse', '')));
+        advBody.appendChild(row('WebDAV',                           chk('webdav', '0')));
+        advBody.appendChild(row('Proxy URL',                        inp('proxyurl', 'http://127.0.0.1:8080')));
+
         wrap.appendChild(advTitle);
         wrap.appendChild(advBody);
+
+        /* ── кнопки сохранения ── */
         wrap.appendChild(E('div', { class: 'ts-save-row' }, [
-            E('button', { class: 'cbi-button cbi-button-apply',
+            E('button', {
+                class: 'cbi-button cbi-button-apply',
                 click: function() {
-                    uci.save().then(function() { return uci.apply(); })
-                    .then(function() {
+                    uci.save().then(function() {
+                        /* true = без rollback-confirm */
+                        return uci.apply(true);
+                    }).then(function() {
                         ui.addNotification(null, E('p', {}, 'Настройки применены.'), 'info');
                     }).catch(function(e) {
-                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + e), 'danger');
+                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + e.message), 'danger');
                     });
                 }
             }, 'Применить'),
-            E('button', { class: 'cbi-button cbi-button-save',
+            E('button', {
+                class: 'cbi-button cbi-button-save',
                 click: function() {
                     uci.save().then(function() {
-                        ui.addNotification(null, E('p', {}, 'Сохранено без применения.'), 'info');
+                        ui.addNotification(null, E('p', {}, 'Настройки сохранены (без применения).'), 'info');
                     });
                 }
             }, 'Сохранить'),
-            E('button', { class: 'cbi-button cbi-button-reset',
+            E('button', {
+                class: 'cbi-button cbi-button-reset',
                 click: function() {
                     uci.unload('torrserver');
                     uci.load('torrserver').then(function() {
-                        ui.addNotification(null, E('p', {}, 'Сброшено.'), 'info');
+                        ui.addNotification(null, E('p', {}, 'Сброшено до сохранённых значений.'), 'info');
+                        /* self захвачен в начале _renderSettings */
+                        const r = document.querySelector('.ts-settings');
+                        if (r) r.replaceWith(self._renderSettings());
                     });
                 }
             }, 'Сбросить')
         ]));
+
         return wrap;
     },
 
+    /* ── стили ── */
     _renderStyles: function() {
         return E('style', {}, [`
-            .ts-root{font-size:14px}
-            .ts-warn{margin:0 0 14px;padding:12px 14px;border-radius:8px;
-                border:1px solid rgba(255,180,0,.5);background:rgba(255,180,0,.09);
-                color:var(--text-color-high,#f5f5f5);line-height:1.7}
-            .ts-wrap{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;align-items:stretch}
-            .ts-card{background:var(--background-color-medium,rgba(255,255,255,.04));
-                border:1px solid var(--border-color-medium,rgba(255,255,255,.10));
-                border-radius:10px;padding:12px;width:180px;text-align:center;
-                display:flex;flex-direction:column;justify-content:space-between;
-                color:var(--text-color-high,#f5f5f5);box-sizing:border-box}
-            .ts-card-wide{width:240px}
-            .ts-card-status{min-height:130px}
-            .ts-head{font-size:10px;color:var(--text-color-medium,#aaa);
-                text-transform:uppercase;margin-bottom:8px;font-weight:600}
-            .ts-val{font-size:22px;font-weight:bold;
-                color:var(--text-color-high,#f5f5f5);line-height:1.2}
-            .ts-unit{font-size:12px;color:var(--text-color-medium,#aaa)}
-            .ts-sub{font-size:11px;color:var(--text-color-medium,#aaa);margin-top:4px}
-            .ts-pid{font-size:10px;color:var(--text-color-medium,#aaa);
-                font-family:monospace;margin-top:2px;display:block;min-height:14px}
-            .ts-bar-bg{background:rgba(255,255,255,.08);height:6px;border-radius:3px;
-                overflow:hidden;margin:8px 0 4px}
-            .ts-bar-fill{background:#2196F3;height:100%;width:0%;
-                transition:width .5s ease-in-out}
-            .ts-cores-grid{display:flex;gap:6px;height:70px;align-items:flex-end;
-                justify-content:center;margin-top:5px}
-            .ts-core-col{width:22px;display:flex;flex-direction:column;
-                align-items:center;height:100%;justify-content:flex-end}
-            .ts-core-track{width:100%;height:55px;background:rgba(255,255,255,.06);
-                border-radius:3px;overflow:hidden;border:1px solid rgba(255,255,255,.08);
-                display:flex;flex-direction:column-reverse}
-            .ts-core-fill{width:100%;background:#4caf50;height:0%;
-                transition:height .4s ease-out}
-            .ts-core-num{font-size:9px;color:var(--text-color-medium,#aaa);margin-top:3px}
-            .ts-ctrl{margin-top:10px;display:flex;gap:6px;
-                justify-content:center;flex-wrap:wrap}
-            .ts-btn-start  {background:#4caf50!important;color:#fff!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:bold}
-            .ts-btn-stop   {background:#f44336!important;color:#fff!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:bold}
-            .ts-btn-restart{background:#ff9800!important;color:#fff!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:bold}
-            .ts-btn-disabled{background:#555!important;color:#aaa!important;border:none;
-                border-radius:4px;padding:5px 14px;cursor:not-allowed;font-size:11px}
-            .ts-btn-busy{opacity:.55;filter:grayscale(60%);pointer-events:none}
-            .ts-log-bar{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-            .ts-log{width:100%;box-sizing:border-box;margin-top:6px;
-                background:var(--background-color-low,#1a1a1a);
-                color:var(--text-color-high,#f8f8f2);border-radius:8px;
-                padding:10px;font-family:monospace;font-size:11px;
-                height:260px;overflow-y:auto;white-space:pre-wrap;
-                border:1px solid var(--border-color-medium,rgba(255,255,255,.12))}
-            .ts-hr{margin:16px 0;border:none;border-top:1px solid rgba(255,255,255,.1)}
-            .ts-settings{margin-top:4px}
-            .ts-section-title{font-size:13px;font-weight:600;
-                color:var(--text-color-high,#f5f5f5);margin:14px 0 8px;
-                border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:4px}
-            .ts-row{display:flex;align-items:center;gap:10px;margin-bottom:7px}
-            .ts-label{width:220px;flex-shrink:0;font-size:13px;
-                color:var(--text-color-high,#f5f5f5)}
-            .ts-field{flex:1}
+            .ts-root { font-size: 14px; }
+            .ts-warn {
+                margin: 0 0 16px;
+                padding: 12px 14px;
+                border-radius: 8px;
+                border: 1px solid rgba(255,180,0,.45);
+                background: rgba(255,180,0,.10);
+                color: var(--text-color-high, #f5f5f5);
+            }
+            .ts-wrap {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 14px;
+                margin-bottom: 18px;
+                align-items: stretch;
+            }
+            .ts-card {
+                background: var(--background-color-medium, rgba(255,255,255,.04));
+                border: 1px solid var(--border-color-medium, rgba(255,255,255,.10));
+                border-radius: 10px;
+                padding: 12px;
+                width: 180px;
+                text-align: center;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                color: var(--text-color-high, #f5f5f5);
+                box-sizing: border-box;
+            }
+            .ts-card-wide  { width: 240px; }
+            .ts-card-status { min-height: 160px; }
+            .ts-head {
+                font-size: 10px;
+                color: var(--text-color-medium, #aaa);
+                text-transform: uppercase;
+                margin-bottom: 8px;
+                font-weight: 600;
+            }
+            .ts-val {
+                font-size: 22px;
+                font-weight: bold;
+                color: var(--text-color-high, #f5f5f5);
+                line-height: 1.2;
+            }
+            .ts-unit  { font-size: 12px; color: var(--text-color-medium, #aaa); }
+            .ts-sub   { font-size: 11px; color: var(--text-color-medium, #aaa); margin-top: 4px; }
+            .ts-pid   { font-size: 10px; color: var(--text-color-medium, #aaa); font-family: monospace; margin-top: 2px; }
+            .ts-bar-bg   { background: rgba(255,255,255,.08); height: 6px; border-radius: 3px; overflow: hidden; margin: 8px 0 4px; }
+            .ts-bar-fill { background: #2196F3; height: 100%; width: 0%; transition: width .5s ease-in-out; }
+            .ts-cores-grid {
+                display: flex;
+                gap: 6px;
+                height: 70px;
+                align-items: flex-end;
+                justify-content: center;
+                margin-top: 5px;
+            }
+            .ts-core-col  { width: 22px; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+            .ts-core-track {
+                width: 100%; height: 55px;
+                background: rgba(255,255,255,.06);
+                border-radius: 3px; overflow: hidden;
+                border: 1px solid rgba(255,255,255,.08);
+                display: flex; flex-direction: column-reverse;
+            }
+            .ts-core-fill  { width: 100%; background: #4caf50; height: 0%; transition: height .4s ease-out; }
+            .ts-core-num   { font-size: 9px; color: var(--text-color-medium,#aaa); margin-top: 3px; }
+            .ts-ctrl { margin-top: 10px; display: flex; gap: 6px; justify-content: center; }
+            .ts-btn-start   { background: #4caf50 !important; color: #fff !important; border: none; border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 11px; }
+            .ts-btn-stop    { background: #f44336 !important; color: #fff !important; border: none; border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 11px; }
+            .ts-btn-restart { background: #ff9800 !important; color: #fff !important; border: none; border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 11px; }
+            .ts-btn-disabled { background: #555 !important; color: #aaa !important; border: none; border-radius: 4px; padding: 5px 10px; cursor: not-allowed; font-size: 11px; }
+            .ts-webui-btn { margin-top: 8px; width: 100%; font-size: 11px; }
+            .ts-log {
+                width: 100%;
+                box-sizing: border-box;
+                background: rgba(0,0,0,.4);
+                color: #f8f8f2;
+                border-radius: 8px;
+                padding: 10px;
+                font-family: monospace;
+                font-size: 11px;
+                height: 260px;
+                overflow-y: auto;
+                white-space: pre-wrap;
+                border: 1px solid rgba(255,255,255,.08);
+                margin-top: 8px;
+            }
+            .ts-settings { margin-top: 4px; }
+            .ts-section-title {
+                font-size: 13px;
+                font-weight: 600;
+                color: var(--text-color-high, #f5f5f5);
+                margin: 16px 0 8px;
+                border-bottom: 1px solid rgba(255,255,255,.08);
+                padding-bottom: 4px;
+            }
+            .ts-row {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 8px;
+            }
+            .ts-label {
+                width: 220px;
+                flex-shrink: 0;
+                font-size: 13px;
+                color: var(--text-color-high, #f5f5f5);
+            }
+            .ts-field { flex: 1; }
             .ts-field input[type=text],
             .ts-field input[type=number],
-            .ts-field select{width:100%;max-width:320px;box-sizing:border-box}
-            .ts-chk{width:16px;height:16px;cursor:pointer}
-            .ts-save-row{margin-top:14px;display:flex;gap:8px}
+            .ts-field select {
+                width: 100%;
+                max-width: 320px;
+                box-sizing: border-box;
+            }
+            .ts-chk { width: 16px; height: 16px; cursor: pointer; }
+            .ts-save-row { margin-top: 16px; display: flex; gap: 8px; }
         `]);
     },
 
