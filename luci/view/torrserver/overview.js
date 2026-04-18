@@ -196,7 +196,7 @@ return view.extend({
         }
 
         function setBar(id, pct) {
-            const e = document.getElementById(id);
+            const e = coresWrap.querySelector('#' + id);
             if (!e)
                 return;
             const h = Math.min(Math.max(Math.round(+pct || 0), 0), 100);
@@ -285,38 +285,35 @@ return view.extend({
         }
 
         function renderStatus(st) {
-            const statusText = document.getElementById('ts-status');
-            const pidText = document.getElementById('ts-pid');
-
             if (!(st.bin_present && st.init_present)) {
-                statusText.textContent = 'NO DAEMON';
-                statusText.className = 'ts-val ts-state-warn';
-                pidText.textContent = '';
+                statusVal.textContent = 'NO DAEMON';
+                statusVal.className = 'ts-val ts-state-warn';
+                pidVal.textContent = '';
                 return;
             }
 
             if (pendingAction === 'start') {
-                statusText.textContent = st.running ? 'ЗАПУЩЕН' : 'STARTING...';
-                statusText.className = 'ts-val ' + (st.running ? 'ts-state-run' : 'ts-state-warn');
+                statusVal.textContent = st.running ? 'ЗАПУЩЕН' : 'STARTING...';
+                statusVal.className = 'ts-val ' + (st.running ? 'ts-state-run' : 'ts-state-warn');
             }
             else if (pendingAction === 'stop') {
-                statusText.textContent = st.running ? 'STOPPING...' : 'ОСТАНОВЛЕН';
-                statusText.className = 'ts-val ' + (st.running ? 'ts-state-warn' : 'ts-state-stop');
+                statusVal.textContent = st.running ? 'STOPPING...' : 'ОСТАНОВЛЕН';
+                statusVal.className = 'ts-val ' + (st.running ? 'ts-state-warn' : 'ts-state-stop');
             }
             else if (pendingAction === 'restart') {
-                statusText.textContent = 'RESTARTING...';
-                statusText.className = 'ts-val ts-state-warn';
+                statusVal.textContent = 'RESTARTING...';
+                statusVal.className = 'ts-val ts-state-warn';
             }
             else if (st.running) {
-                statusText.textContent = 'ЗАПУЩЕН';
-                statusText.className = 'ts-val ts-state-run';
+                statusVal.textContent = 'ЗАПУЩЕН';
+                statusVal.className = 'ts-val ts-state-run';
             }
             else {
-                statusText.textContent = 'ОСТАНОВЛЕН';
-                statusText.className = 'ts-val ts-state-stop';
+                statusVal.textContent = 'ОСТАНОВЛЕН';
+                statusVal.className = 'ts-val ts-state-stop';
             }
 
-            pidText.textContent = st.pid ? ('PID ' + st.pid) : '';
+            pidVal.textContent = st.pid ? ('PID ' + st.pid) : '';
         }
 
         function renderMetrics(st) {
@@ -327,27 +324,20 @@ return view.extend({
             const cpuPct = parseFloat(st.ts_cpu || '0') || 0;
             const cores = Array.isArray(st.cores) ? st.cores : [];
 
-            const memEl = document.getElementById('ts-mem');
-            const barEl = document.getElementById('ts-mem-bar');
-            const detEl = document.getElementById('ts-mem-det');
-            const cpuEl = document.getElementById('ts-cpu');
-            const ct = document.getElementById('ts-cores-txt');
-
-            if (memEl)
-                memEl.textContent = running ? fmtMb(memKb, 1) : '0.0';
-            if (detEl)
-                detEl.textContent = total > 0 ? ('Free: ' + fmtMb(avail, 0) + ' MB | Total: ' + fmtMb(total, 0) + ' MB') : 'Free: — | Total: —';
-            if (barEl)
-                barEl.style.width = (running && total > 0) ? Math.max((memKb / total) * 100, 1) + '%' : '0%';
-            if (cpuEl)
-                cpuEl.textContent = running ? cpuPct.toFixed(1) : '0.0';
+            memVal.textContent = running ? fmtMb(memKb, 1) : '0.0';
+            memDetails.textContent = total > 0
+                ? ('Free: ' + fmtMb(avail, 0) + ' MB | Total: ' + fmtMb(total, 0) + ' MB')
+                : 'Free: — | Total: —';
+            memBar.style.width = (running && total > 0)
+                ? Math.max((memKb / total) * 100, 1) + '%'
+                : '0%';
+            cpuVal.textContent = running ? cpuPct.toFixed(1) : '0.0';
 
             ensureCoreColumns(cores.length);
-            if (ct)
-                ct.textContent = cores.length ? cores.map(function(v, i) {
-                    setBar('ts-c' + i, v);
-                    return 'CPU' + i + ': ' + (+v).toFixed(1) + '%';
-                }).join(' | ') : '—';
+            coresTxt.textContent = cores.length ? cores.map(function(v, i) {
+                setBar('ts-c' + i, v);
+                return 'CPU' + i + ': ' + (+v).toFixed(1) + '%';
+            }).join(' | ') : '—';
         }
 
         function refreshLog() {
