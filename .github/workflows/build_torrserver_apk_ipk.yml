@@ -426,6 +426,7 @@ jobs:
             local bin_path="$2"
             local arch="$3"
             local yaml_path="$4"
+            local conflict_pkg="$5"
 
             cat > "${yaml_path}" <<EOF
           name: ${pkg_name}
@@ -438,6 +439,15 @@ jobs:
           description: "${PKG_DESC}"
           homepage: https://github.com/${UPSTREAM_REPO}
           license: GPL-3.0
+
+          provides:
+            - torrserver-daemon
+
+          conflicts:
+            - ${conflict_pkg}
+
+          replaces:
+            - ${conflict_pkg}
 
           depends:
             - procd
@@ -480,23 +490,24 @@ jobs:
             local flavor="$1"
             local pkg_name="$2"
             local bin_path="$3"
+            local conflict_pkg="$4"
 
             for arch in "${ARCHS[@]}"; do
               for fmt in "${FORMATS[@]}"; do
                 yaml="nfpm_${flavor}_${arch}_${fmt}.yaml"
                 target="${pkg_name}_${PKG_VERSION}_${arch}.${fmt}"
                 echo "Building ${target}"
-                make_nfpm_yaml "${pkg_name}" "${bin_path}" "${arch}" "${yaml}"
+                make_nfpm_yaml "${pkg_name}" "${bin_path}" "${arch}" "${yaml}" "${conflict_pkg}"
                 nfpm package --config "${yaml}" --packager "${fmt}" --target "${target}"
                 test -f "${target}"
               done
             done
           }
 
-          build_flavor "standard" "${PKG_NAME}" "${OUT_BIN}"
+          build_flavor "standard" "${PKG_NAME}"      "${OUT_BIN}"     "${PKG_NAME}-upx"
 
           if [[ "${USE_UPX_INPUT}" == "true" ]]; then
-            build_flavor "upx" "${PKG_NAME}-upx" "${OUT_BIN_UPX}"
+            build_flavor "upx"      "${PKG_NAME}-upx" "${OUT_BIN_UPX}" "${PKG_NAME}"
           fi
 
       - name: Show built package list
