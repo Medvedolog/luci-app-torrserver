@@ -34,7 +34,7 @@ function _read_cpu_snapshot() {
     const stat_txt = readfile('/proc/stat') || '';
     const cur_sys = {};
 
-    for (const line in split(stat_txt, '\n')) {
+    for (let line in split(stat_txt, '\n')) {
         const m = match(line, /^(cpu\d*)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
         if (!m)
             continue;
@@ -83,7 +83,7 @@ export function action_status() {
     };
 
     const meminfo = readfile('/proc/meminfo') || '';
-    for (const line in split(meminfo, '\n')) {
+    for (let line in split(meminfo, '\n')) {
         const m = match(line, /^(\w+):\s+(\d+)/);
         if (!m)
             continue;
