@@ -55,7 +55,7 @@ jobs:
           mkdir -p \
             root/usr/share/luci/menu.d \
             root/usr/share/rpcd/acl.d \
-            root/usr/share/luci/view/torrserver \
+            root/www/luci-static/resources/view/torrserver \
             root/usr/share/ucode/luci/controller \
             packaging
 
@@ -66,7 +66,7 @@ jobs:
              root/usr/share/rpcd/acl.d/luci-app-torrserver.json
 
           cp luci/view/torrserver/overview.js \
-             root/usr/share/luci/view/torrserver/overview.js
+             root/www/luci-static/resources/view/torrserver/overview.js
 
           cp luci/controller/torrserver.uc \
              root/usr/share/ucode/luci/controller/torrserver.uc
@@ -84,7 +84,7 @@ jobs:
           #!/bin/sh
           echo "============================================================"
           echo " Installed PLACEHOLDER_PKG_NAME version PLACEHOLDER_PKG_VERSION"
-          echo " View:       /usr/share/luci/view/torrserver/overview.js"
+          echo " View: /www/luci-static/resources/view/torrserver/overview.js"
           echo " Controller: /usr/share/ucode/luci/controller/torrserver.uc"
           echo " Menu:       /usr/share/luci/menu.d/luci-app-torrserver.json"
           echo " ACL:        /usr/share/rpcd/acl.d/luci-app-torrserver.json"
@@ -157,8 +157,8 @@ jobs:
               file_info:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
-            - src: ./root/usr/share/luci/view/torrserver/overview.js
-              dst: /usr/share/luci/view/torrserver/overview.js
+            - src: ./root/www/luci-static/resources/view/torrserver/overview.js
+              dst: /www/luci-static/resources/view/torrserver/overview.js
               file_info:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
@@ -202,8 +202,8 @@ jobs:
               dst: /usr/share/rpcd/acl.d/luci-app-torrserver.json
               file_info:
                 mode: 0644
-            - src: ./root/usr/share/luci/view/torrserver/overview.js
-              dst: /usr/share/luci/view/torrserver/overview.js
+            - src: ./root/www/luci-static/resources/view/torrserver/overview.js
+              dst: /www/luci-static/resources/view/torrserver/overview.js
               file_info:
                 mode: 0644
             - src: ./root/usr/share/ucode/luci/controller/torrserver.uc
