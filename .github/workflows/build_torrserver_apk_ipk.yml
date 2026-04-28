@@ -52,7 +52,7 @@ jobs:
           if [[ -z "${REQUESTED_REF}" || "${REQUESTED_REF}" == "latest" ]]; then
             REQUESTED_REF="$(git ls-remote --refs --tags "${REPO_URL}" \
               | awk -F/ '{print $3}' \
-              | grep -E '^MatriX\.[0-9]+' \
+              | grep -E '^(MatriX\.[0-9]+|v[0-9]+)' \
               | sort -V \
               | tail -n 1)"
           fi
@@ -170,8 +170,6 @@ jobs:
           export CGO_ENABLED=0
           export GOOS=linux
           export GOARCH=arm64
-
-          go mod tidy
 
           go build \
             -trimpath \
@@ -356,6 +354,7 @@ jobs:
           echo "============================================================"
 
           [ -n "\${IPKG_INSTROOT}" ] && exit 0
+          [ -n "\${APK_INSTROOT}" ] && exit 0
 
           echo "[postinstall] enabling service..."
           /etc/init.d/torrserver enable >/dev/null 2>&1 || true
@@ -382,6 +381,7 @@ jobs:
           echo "============================================================"
 
           [ -n "${IPKG_INSTROOT}" ] && exit 0
+          [ -n "${APK_INSTROOT}" ] && exit 0
 
           echo "[preremove] stopping service..."
           /etc/init.d/torrserver stop >/dev/null 2>&1 || true
@@ -426,7 +426,6 @@ jobs:
             local bin_path="$2"
             local arch="$3"
             local yaml_path="$4"
-            local conflict_pkg="$5"
 
             cat > "${yaml_path}" <<EOF
           name: ${pkg_name}
@@ -439,15 +438,6 @@ jobs:
           description: "${PKG_DESC}"
           homepage: https://github.com/${UPSTREAM_REPO}
           license: GPL-3.0
-
-          provides:
-            - torrserver-daemon
-
-          conflicts:
-            - ${conflict_pkg}
-
-          replaces:
-            - ${conflict_pkg}
 
           depends:
             - procd
@@ -490,24 +480,23 @@ jobs:
             local flavor="$1"
             local pkg_name="$2"
             local bin_path="$3"
-            local conflict_pkg="$4"
 
             for arch in "${ARCHS[@]}"; do
               for fmt in "${FORMATS[@]}"; do
                 yaml="nfpm_${flavor}_${arch}_${fmt}.yaml"
                 target="${pkg_name}_${PKG_VERSION}_${arch}.${fmt}"
                 echo "Building ${target}"
-                make_nfpm_yaml "${pkg_name}" "${bin_path}" "${arch}" "${yaml}" "${conflict_pkg}"
+                make_nfpm_yaml "${pkg_name}" "${bin_path}" "${arch}" "${yaml}"
                 nfpm package --config "${yaml}" --packager "${fmt}" --target "${target}"
                 test -f "${target}"
               done
             done
           }
 
-          build_flavor "standard" "${PKG_NAME}"      "${OUT_BIN}"     "${PKG_NAME}-upx"
+          build_flavor "standard" "${PKG_NAME}" "${OUT_BIN}"
 
           if [[ "${USE_UPX_INPUT}" == "true" ]]; then
-            build_flavor "upx"      "${PKG_NAME}-upx" "${OUT_BIN_UPX}" "${PKG_NAME}"
+            build_flavor "upx" "${PKG_NAME}-upx" "${OUT_BIN_UPX}"
           fi
 
       - name: Show built package list
