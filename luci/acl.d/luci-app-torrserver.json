@@ -1,10 +1,18 @@
 {
   "luci-app-torrserver": {
-    "description": "Grant UCI access for TorrServer LuCI app",
+    "description": "Grant access to TorrServer RPC and UCI",
     "read": {
+      "ubus": {
+        "torrserver": [ "status", "log" ],
+        "network.interface.lan": [ "status" ],
+        "uci": [ "get", "changes" ]
+      },
       "uci": [ "torrserver", "network" ]
     },
     "write": {
+      "ubus": {
+        "torrserver": [ "start", "stop", "restart", "enable", "disable" ]
+      },
       "uci": [ "torrserver" ]
     }
   }
