@@ -1,0 +1,241 @@
+'use strict';
+
+import { readfile, popen, open, stat } from 'fs';
+
+function s(v) {
+    return v ? trim(v) : '';
+}
+
+function rc(cmd) {
+    const p = popen(cmd + ' >/dev/null 2>&1; echo $?', 'r');
+    const out = p ? s(p.read('all')) : '127';
+    if (p) p.close();
+    return +out;
+}
+
+function get_pid() {
+    const p = popen('pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" 2>/dev/null | head -n 1', 'r');
+    const out = p ? s(p.read('all')) : '';
+    if (p) p.close();
+    if (!out || stat('/proc/' + out) == null) return null;
+    return out;
+}
+
+function service_running() {
+    return rc('/etc/init.d/torrserver running') == 0;
+}
+
+function read_cpu_snapshot() {
+    const txt = readfile('/proc/stat') || '';
+    const cur = {};
+    for (let line in split(txt, '\n')) {
+        const m = match(line, /^(cpu\d*)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+        if (!m) continue;
+        const u = +m[2], n = +m[3], sv = +m[4], i = +m[5];
+        cur[m[1]] = { total: u+n+sv+i, work: u+n+sv };
+    }
+    return cur;
+}
+
+function kill_lingering() {
+    const t = popen(
+        'pids=$(pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" 2>/dev/null); ' +
+        '[ -n "$pids" ] && kill -TERM $pids 2>/dev/null; echo "$pids"', 'r');
+    const pids = t ? s(t.read('all')) : '';
+    if (t) t.close();
+    if (!length(pids)) return true;
+
+    let gone = false;
+    for (let i = 0; i < 10; i++) {
+        const chk = popen('pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" >/dev/null 2>&1; echo $?', 'r');
+        const still = chk ? s(chk.read('all')) : '1';
+        if (chk) chk.close();
+        if (still === '1') { gone = true; break; }
+        const sl = popen('sleep 0.3 2>/dev/null || true', 'r');
+        if (sl) sl.close();
+    }
+    if (gone) return true;
+
+    const k = popen(
+        'pids=$(pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" 2>/dev/null); ' +
+        '[ -n "$pids" ] && kill -KILL $pids 2>/dev/null; true', 'r');
+    if (k) k.close();
+    const sl2 = popen('sleep 0.3 2>/dev/null || true', 'r');
+    if (sl2) sl2.close();
+
+    const fin = popen('pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" >/dev/null 2>&1; echo $?', 'r');
+    const rc2 = fin ? s(fin.read('all')) : '0';
+    if (fin) fin.close();
+    return rc2 === '1';
+}
+
+/* Подождать до max_ms мс пока сервис не перейдёт в ожидаемое состояние.
+ * want_running: true = ждём запуска, false = ждём остановки */
+function wait_state(want_running, max_ms) {
+    const steps = max_ms / 300;
+    for (let i = 0; i < steps; i++) {
+        if (service_running() === want_running) return true;
+        const sl = popen('sleep 0.3 2>/dev/null || true', 'r');
+        if (sl) sl.close();
+    }
+    return service_running() === want_running;
+}
+
+return {
+    status: {
+        call: function() {
+            const has_bin  = stat('/usr/bin/torrserver')    != null;
+            const has_init = stat('/etc/init.d/torrserver') != null;
+            const has_cfg  = stat('/etc/config/torrserver') != null;
+            const running  = has_init ? service_running() : false;
+            const pid      = running ? get_pid() : null;
+
+            const data = {
+                running:        running,
+                pid:            pid,
+                bin_present:    has_bin,
+                init_present:   has_init,
+                config_present: has_cfg,
+                mem_kb:         0,
+                ts_cpu:         '0.0',
+                sys_mem:        { total: 0, free: 0, available: 0 },
+                cores:          []
+            };
+
+            const meminfo = readfile('/proc/meminfo') || '';
+            for (let line in split(meminfo, '\n')) {
+                const m = match(line, /^(\w+):\s+(\d+)/);
+                if (!m) continue;
+                if      (m[1] == 'MemTotal')     data.sys_mem.total     = +m[2];
+                else if (m[1] == 'MemFree')      data.sys_mem.free      = +m[2];
+                else if (m[1] == 'MemAvailable') data.sys_mem.available = +m[2];
+            }
+            if (!data.sys_mem.available)
+                data.sys_mem.available = data.sys_mem.free;
+
+            let cur_proc_total = 0;
+            if (pid) {
+                const st = readfile('/proc/' + pid + '/status') || '';
+                const rm = match(st, /VmRSS:\s+(\d+)/);
+                if (rm) data.mem_kb = +rm[1];
+                const pstat = readfile('/proc/' + pid + '/stat') || '';
+                const parts = split(pstat, ' ');
+                cur_proc_total = (+parts[13] || 0) + (+parts[14] || 0);
+            }
+
+            const cur_sys = read_cpu_snapshot();
+            let prev = {};
+            const sf = open('/tmp/ts_monitor_state.json', 'r');
+            if (sf) {
+                try { prev = json(sf.read('all')) || {}; } catch(e) {}
+                sf.close();
+            }
+
+            for (let i = 0; ; i++) {
+                const k = 'cpu' + i;
+                if (!cur_sys[k]) break;
+                let pct = 0;
+                if (prev[k]) {
+                    const dt = cur_sys[k].total - (prev[k].total || 0);
+                    const dw = cur_sys[k].work  - (prev[k].work  || 0);
+                    if (dt > 0) pct = +sprintf('%.1f', (dw / dt) * 100);
+                }
+                push(data.cores, pct);
+            }
+
+            if (pid && cur_sys['cpu'] && prev['cpu'] &&
+                prev['pid'] === pid && prev['proc'] != null) {
+                const d_sys  = cur_sys['cpu'].total - (prev['cpu'].total || 0);
+                const d_proc = cur_proc_total - (prev['proc'] || 0);
+                let ncpu = length(data.cores) || 1;
+                if (d_sys > 0)
+                    data.ts_cpu = sprintf('%.1f', (d_proc / d_sys) * 100 * ncpu);
+            }
+
+            const ns = cur_sys;
+            ns['proc'] = pid ? cur_proc_total : null;
+            ns['pid']  = pid;
+            const wf = open('/tmp/ts_monitor_state.json', 'w');
+            if (wf) { wf.write(json(ns)); wf.close(); }
+
+            return data;
+        }
+    },
+
+    log: {
+        call: function() {
+            const p = popen('logread -e torrserver 2>/dev/null | tail -n 200', 'r');
+            const out = p ? (p.read('all') || '') : '';
+            if (p) p.close();
+            return { log: length(s(out)) ? out : 'Нет событий torrserver в логе.' };
+        }
+    },
+
+    start: {
+        call: function() {
+            const init_ok = rc('/etc/init.d/torrserver start') == 0;
+            /* Верифицируем что процесс реально поднялся */
+            const running = init_ok ? wait_state(true, 3000) : false;
+            const pid     = running ? get_pid() : null;
+            return {
+                ok:     running,
+                pid:    pid,
+                detail: running ? 'started' : (init_ok ? 'start_no_process' : 'init_failed')
+            };
+        }
+    },
+
+    stop: {
+        call: function() {
+            const init_rc = rc('/etc/init.d/torrserver stop');
+            /* Ждём чистой остановки через procd */
+            const stopped_clean = wait_state(false, 3000);
+            /* Если ещё живёт — добиваем */
+            const ok = stopped_clean ? true : kill_lingering();
+            return {
+                ok:     ok,
+                detail: stopped_clean  ? 'stopped_clean'
+                      : ok             ? 'stopped_killed'
+                      :                  'lingering_processes',
+                init_rc: init_rc
+            };
+        }
+    },
+
+    restart: {
+        call: function() {
+            /* Остановка с зачисткой */
+            rc('/etc/init.d/torrserver stop');
+            if (!wait_state(false, 3000))
+                kill_lingering();
+
+            /* Пауза чтобы procd сбросил respawn счётчик */
+            const sl = popen('sleep 0.5 2>/dev/null || true', 'r');
+            if (sl) sl.close();
+
+            /* Запуск с верификацией */
+            const init_ok = rc('/etc/init.d/torrserver start') == 0;
+            const running = init_ok ? wait_state(true, 3000) : false;
+            const pid     = running ? get_pid() : null;
+            return {
+                ok:     running,
+                pid:    pid,
+                detail: running ? 'restarted' : (init_ok ? 'start_no_process' : 'start_failed')
+            };
+        }
+    },
+
+    enable: {
+        call: function() {
+            const ok = rc('/etc/init.d/torrserver enable') == 0;
+            return { ok: ok };
+        }
+    },
+
+    disable: {
+        call: function() {
+            const ok = rc('/etc/init.d/torrserver disable') == 0;
+            return { ok: ok };
+        }
+    }
+};
