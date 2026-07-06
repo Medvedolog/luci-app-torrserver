@@ -1,0 +1,349 @@
+# .github/workflows/import_torrserver_repo_from_zip.yml
+# Imports a luci-app-torrserver repository ZIP into the current repository.
+#
+# Expected layout inside the ZIP, usually under luci-app-torrserver-main/:
+#   README.md                                optional
+#   CLAUDE.md                                optional
+#   luci/acl.d/luci-app-torrserver.json
+#   luci/menu.d/luci-app-torrserver.json
+#   luci/rpcd/torrserver
+#   luci/view/torrserver/overview.js
+#   .github/workflows/build_torrserver_apk_ipk.yml                         optional
+#   .github/workflows/Build LuCI App TorrServer Companion.yml               optional
+#
+# Notes:
+# - By default this imports source/docs only and does NOT overwrite workflows.
+# - To import .github/workflows too, set import_workflows=true.
+# - If GitHub rejects workflow-file changes with GITHUB_TOKEN, create a secret
+#   named IMPORT_TOKEN from a PAT that can update workflow files, then rerun.
+
+name: import-torrserver-repo-from-zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Path to ZIP inside the repository"
+        required: true
+        default: "_incoming/luci-app-torrserver-openwrt-hybrid-release.zip"
+      source_root:
+        description: "Root folder inside ZIP; blank = auto-detect first dir or flat ZIP"
+        required: false
+        default: "luci-app-torrserver-main"
+      import_workflows:
+        description: "Import .github/workflows from ZIP"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      import_docs:
+        description: "Import README/CLAUDE/LICENSE/CHANGELOG if present"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      dry_run:
+        description: "Validate and show diff without committing"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      commit_message:
+        description: "Commit message"
+        required: true
+        default: "Import luci-app-torrserver repository from ZIP"
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    name: Import repository ZIP
+    runs-on: ubuntu-latest
+
+    env:
+      IMPORT_WORKFLOWS: ${{ github.event.inputs.import_workflows }}
+      IMPORT_DOCS: ${{ github.event.inputs.import_docs }}
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+      ZIP_PATH: ${{ github.event.inputs.zip_path }}
+      SOURCE_ROOT_INPUT: ${{ github.event.inputs.source_root }}
+      COMMIT_MESSAGE: ${{ github.event.inputs.commit_message }}
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.IMPORT_TOKEN != '' && secrets.IMPORT_TOKEN || github.token }}
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq unzip nodejs ruby
+
+      - name: Validate ZIP exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "ERROR: ZIP not found at '$ZIP_PATH'"
+            echo "Available files in _incoming/:"
+            ls -la _incoming/ 2>/dev/null || echo "  (_incoming/ does not exist)"
+            exit 1
+          fi
+          file "$ZIP_PATH"
+          unzip -tq "$ZIP_PATH" >/dev/null
+          echo "ZIP integrity OK"
+
+      - name: Unpack ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _workzip
+          mkdir -p _workzip
+          unzip -q "$ZIP_PATH" -d _workzip
+          echo "=== ZIP contents, top 4 levels ==="
+          find _workzip -maxdepth 4 -type f | sort | head -120
+
+      - name: Detect source root
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$SOURCE_ROOT_INPUT"
+
+          if [ -n "$ROOT" ] && [ -d "_workzip/$ROOT" ]; then
+            echo "src=_workzip/$ROOT" >> "$GITHUB_OUTPUT"
+            echo "Found exact source root: _workzip/$ROOT"
+            exit 0
+          fi
+
+          # If ZIP has exactly one top-level directory, use it.
+          dir_count="$(find _workzip -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+          first_dir="$(find _workzip -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+          if [ "$dir_count" = "1" ] && [ -n "$first_dir" ]; then
+            echo "src=$first_dir" >> "$GITHUB_OUTPUT"
+            echo "Using single top-level directory: $first_dir"
+            exit 0
+          fi
+
+          # Flat ZIP: luci/ is directly under archive root.
+          if [ -d "_workzip/luci" ]; then
+            echo "src=_workzip" >> "$GITHUB_OUTPUT"
+            echo "Flat ZIP detected: using _workzip"
+            exit 0
+          fi
+
+          echo "ERROR: Cannot detect source root inside ZIP"
+          echo "Top-level entries:"
+          find _workzip -mindepth 1 -maxdepth 1 -print | sort
+          exit 1
+
+      - name: Validate expected luci-app-torrserver layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.src }}"
+
+          test -d "$SRC/luci"                                             || { echo "MISSING: luci/"; exit 1; }
+          test -f "$SRC/luci/acl.d/luci-app-torrserver.json"              || { echo "MISSING: luci/acl.d/luci-app-torrserver.json"; exit 1; }
+          test -f "$SRC/luci/menu.d/luci-app-torrserver.json"             || { echo "MISSING: luci/menu.d/luci-app-torrserver.json"; exit 1; }
+          test -f "$SRC/luci/view/torrserver/overview.js"                 || { echo "MISSING: luci/view/torrserver/overview.js"; exit 1; }
+          test -f "$SRC/luci/rpcd/torrserver"                             || { echo "MISSING: luci/rpcd/torrserver"; exit 1; }
+
+          if find "$SRC" -type l | grep -q .; then
+            echo "ERROR: refusing to import ZIP with symlinks"
+            find "$SRC" -type l -ls
+            exit 1
+          fi
+
+          echo "Layout validated OK"
+          echo "=== Source tree preview ==="
+          find "$SRC" -maxdepth 5 -type f | sort | head -120
+
+      - name: Validate JSON files
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.src }}"
+          for j in \
+            "$SRC/luci/acl.d/luci-app-torrserver.json" \
+            "$SRC/luci/menu.d/luci-app-torrserver.json"; do
+            jq empty "$j"
+            echo "OK: $j"
+          done
+
+      - name: Validate LuCI JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.src }}"
+          fail=0
+          while IFS= read -r f; do
+            if node --check "$f" 2>/tmp/luci-js.err; then
+              echo "OK:   $f"
+            else
+              echo "FAIL: $f"
+              cat /tmp/luci-js.err
+              fail=1
+            fi
+          done < <(find "$SRC/luci/view" -type f -name '*.js' | sort)
+          [ "$fail" = 0 ] || { echo "LuCI JS syntax check failed"; exit 1; }
+
+      - name: Validate workflow YAML from ZIP when requested
+        if: ${{ github.event.inputs.import_workflows == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.src }}"
+          if [ ! -d "$SRC/.github/workflows" ]; then
+            echo "WARN: import_workflows=true but ZIP has no .github/workflows directory"
+            exit 0
+          fi
+          while IFS= read -r yml; do
+            ruby -e 'require "yaml"; YAML.load_file(ARGV[0]); puts "OK: #{ARGV[0]}"' "$yml"
+          done < <(find "$SRC/.github/workflows" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+
+      - name: Clean managed source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Clean only project-managed source. Do not remove .git, _incoming,
+          # releases, artifacts, or arbitrary local files.
+          rm -rf luci
+          mkdir -p luci
+
+      - name: Import luci source and optional docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.src }}"
+
+          cp -a "$SRC/luci/." luci/
+
+          if [ "$IMPORT_DOCS" = "true" ]; then
+            for f in README.md CLAUDE.md LICENSE LICENSE.md CHANGELOG.md; do
+              if [ -f "$SRC/$f" ]; then
+                cp -a "$SRC/$f" "$f"
+                echo "Imported doc: $f"
+              else
+                echo "note: no $f in ZIP"
+              fi
+            done
+          fi
+
+      - name: Import workflows when requested
+        if: ${{ github.event.inputs.import_workflows == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.src }}"
+          if [ ! -d "$SRC/.github/workflows" ]; then
+            echo "No workflows to import"
+            exit 0
+          fi
+
+          mkdir -p .github/workflows
+
+          # Replace only known torrserver workflow files, preserving this importer.
+          rm -f \
+            ".github/workflows/Build LuCI App TorrServer Companion.yml" \
+            ".github/workflows/build_torrserver_apk_ipk.yml"
+
+          while IFS= read -r wf; do
+            base="$(basename "$wf")"
+            case "$base" in
+              import_torrserver_repo_from_zip.yml|import_build_from_zip.yml)
+                echo "Skipping importer workflow from ZIP: $base"
+                ;;
+              *.yml|*.yaml)
+                cp -a "$wf" ".github/workflows/$base"
+                echo "Imported workflow: $base"
+                ;;
+            esac
+          done < <(find "$SRC/.github/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+
+      - name: Normalize permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          find luci -type f -exec chmod 0644 {} \;
+          [ -f luci/rpcd/torrserver ] && chmod 0755 luci/rpcd/torrserver
+
+          for f in README.md CLAUDE.md LICENSE LICENSE.md CHANGELOG.md; do
+            [ -f "$f" ] && chmod 0644 "$f"
+          done
+
+          if [ -d .github/workflows ]; then
+            find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -exec chmod 0644 {} \;
+          fi
+
+      - name: Post-import validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Imported luci files ==="
+          find luci -type f | sort
+          echo
+          echo "=== Executable files under luci/ ==="
+          find luci -type f -perm -u+x | sort
+          echo
+          echo "=== Key files ==="
+          for f in \
+            luci/acl.d/luci-app-torrserver.json \
+            luci/menu.d/luci-app-torrserver.json \
+            luci/rpcd/torrserver \
+            luci/view/torrserver/overview.js; do
+            test -f "$f" && echo "OK: $f" || { echo "MISSING AFTER IMPORT: $f"; exit 1; }
+          done
+
+      - name: Show git diff summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          git diff --stat || true
+
+      - name: Commit and push changes
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add luci
+
+          if [ "$IMPORT_DOCS" = "true" ]; then
+            for f in README.md CLAUDE.md LICENSE LICENSE.md CHANGELOG.md; do
+              [ -f "$f" ] && git add "$f" || true
+            done
+          fi
+
+          if [ "$IMPORT_WORKFLOWS" = "true" ]; then
+            git add .github/workflows
+          fi
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "$COMMIT_MESSAGE"
+          git push
+
+      - name: Dry-run result
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Dry run requested: validation and diff completed, no commit was created."
