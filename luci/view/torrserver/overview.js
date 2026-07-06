@@ -447,7 +447,7 @@ return view.extend({
         wrap.appendChild(row('Автозапуск',         chkAutostart()));
         wrap.appendChild(row('Порт',               inp('port', '8090', 'number', 1, 65535)));
         wrap.appendChild(row('Рабочая директория', inp('path', '/opt/torrserver')));
-        wrap.appendChild(row('Режим прокси',       sel('proxymode', ['tracker','all','off'], 'tracker')));
+        wrap.appendChild(row('Режим прокси',       sel('proxymode', ['tracker','peers','full'], 'tracker')));
 
         const advBody  = E('div', { style: 'display:none' });
         const advTitle = E('h3', {
@@ -483,7 +483,7 @@ return view.extend({
                 class: 'cbi-button cbi-button-apply',
                 click: function() {
                     uci.save().then(function() {
-                        return uci.apply(true);
+                        return uci.apply(30);
                     }).then(function() {
                         ui.addNotification(null, E('p', {}, 'Настройки применены.'), 'info');
                         /* После apply — обновляем статус чтобы убедиться что сервис поднялся */
