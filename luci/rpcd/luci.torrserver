@@ -1,0 +1,328 @@
+#!/bin/sh
+# rpcd executable plugin for LuCI TorrServer monitoring.
+# Object: luci.torrserver (legacy copy may be installed as torrserver).
+# Contract: status/log only. Service control stays on luci.setInitAction.
+
+BIN_PATH="/usr/bin/torrserver"
+INIT_PATH="/etc/init.d/torrserver"
+CFG_PATH="/etc/config/torrserver"
+STATE_DIR="/tmp/torrserver"
+STATE_FILE="$STATE_DIR/luci_cpu_state"
+STATUS_CACHE="$STATE_DIR/luci_status_cache.json"
+STATUS_TTL=3
+
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+json_string() {
+	awk 'BEGIN { printf "\"" }
+	{
+		gsub(/\\/, "\\\\");
+		gsub(/\"/, "\\\"");
+		gsub(/\r/, "\\r");
+		gsub(/\t/, "\\t");
+		if (NR > 1) printf "\\n";
+		printf "%s", $0;
+	}
+	END { printf "\"" }'
+}
+
+json_line_array() {
+	awk 'BEGIN { printf "["; first=1 }
+	{
+		gsub(/\\/, "\\\\");
+		gsub(/\"/, "\\\"");
+		gsub(/\r/, "\\r");
+		gsub(/\t/, "\\t");
+		if (!first) printf ",";
+		printf "\"%s\"", $0;
+		first=0;
+	}
+	END { printf "]" }'
+}
+
+uci_get() {
+	uci -q get "$1" 2>/dev/null || true
+}
+
+is_running() {
+	[ -x "$INIT_PATH" ] && "$INIT_PATH" running >/dev/null 2>&1 && return 0
+	pid="$(get_pid)"
+	[ -n "$pid" ] && return 0
+	return 1
+}
+
+is_enabled() {
+	[ -x "$INIT_PATH" ] && "$INIT_PATH" enabled >/dev/null 2>&1 && return 0
+	return 1
+}
+
+get_pid() {
+	for c in /proc/[0-9]*/cmdline; do
+		[ -r "$c" ] || continue
+		cl="$(tr '\0' ' ' < "$c" 2>/dev/null)" || continue
+		case "$cl" in
+			*"/etc/init.d/torrserver"*) continue ;;
+			*"rc.common"*) continue ;;
+			"$BIN_PATH"|"$BIN_PATH "*)
+				p=${c#/proc/}; p=${p%/cmdline}; printf '%s\n' "$p"; return 0 ;;
+		esac
+	done
+	pgrep -f "^${BIN_PATH}([[:space:]]|$)" 2>/dev/null | head -n 1
+}
+
+cpu_count() {
+	n=$(grep -c '^cpu[0-9]' /proc/stat 2>/dev/null)
+	[ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null && printf '%s\n' "$n" || printf '1\n'
+}
+
+read_cpu_total() {
+	awk '/^cpu / { total=0; for (i=2;i<=NF;i++) total += $i; print total; exit }' /proc/stat 2>/dev/null
+}
+
+read_cpu_work() {
+	awk '/^cpu / { total=0; for (i=2;i<=NF;i++) total += $i; idle=$5+$6; print total-idle; exit }' /proc/stat 2>/dev/null
+}
+
+emit_cores() {
+	[ -r /proc/stat ] || return 1
+	first=1
+	awk '/^cpu[0-9]+[[:space:]]/ {
+		total=0; for (i=2;i<=NF;i++) total += $i;
+		idle=$5+$6; work=total-idle;
+		print $1, total, work;
+	}' /proc/stat 2>/dev/null |
+	while read -r name total work; do
+		pct="0.0"
+		if [ -r "$STATE_FILE" ]; then
+			prev="$(grep "^${name} " "$STATE_FILE" 2>/dev/null)"
+			pt="$(printf '%s\n' "$prev" | awk '{print $2}')"
+			pw="$(printf '%s\n' "$prev" | awk '{print $3}')"
+			if [ -n "$pt" ] && [ -n "$pw" ]; then
+				dt=$((total - pt))
+				dw=$((work - pw))
+				if [ "$dt" -gt 0 ] 2>/dev/null; then
+					pct="$(awk -v dw="$dw" -v dt="$dt" 'BEGIN { printf "%.1f", (dw / dt) * 100 }')"
+				fi
+			fi
+		fi
+		[ "$first" = 1 ] || printf ','
+		printf '%s' "$pct"
+		first=0
+	done
+}
+
+write_state() {
+	pid="$1"
+	proc_ticks="$2"
+	{
+		awk '/^cpu[0-9]*[[:space:]]/ {
+			total=0; for (i=2;i<=NF;i++) total += $i;
+			idle=$5+$6; work=total-idle;
+			print $1, total, work;
+		}' /proc/stat 2>/dev/null
+		printf 'pid %s %s\n' "${pid:-0}" "${proc_ticks:-0}"
+	} > "$STATE_FILE.$$" 2>/dev/null && mv "$STATE_FILE.$$" "$STATE_FILE" 2>/dev/null || rm -f "$STATE_FILE.$$" 2>/dev/null
+}
+
+cache_is_fresh() {
+	[ -s "$STATUS_CACHE" ] || return 1
+	now="$(date +%s 2>/dev/null)" || return 1
+	mt="$(stat -c %Y "$STATUS_CACHE" 2>/dev/null)" || return 1
+	age=$((now - mt))
+	[ "$age" -ge 0 ] 2>/dev/null && [ "$age" -lt "$STATUS_TTL" ] 2>/dev/null
+}
+
+method_status_uncached() {
+	bin_present=false;    [ -x "$BIN_PATH" ]  && bin_present=true
+	init_present=false;   [ -x "$INIT_PATH" ] && init_present=true
+	config_present=false; [ -f "$CFG_PATH" ]  && config_present=true
+	if is_enabled; then enabled=true; else enabled=false; fi
+
+	pid="$(get_pid)"
+	if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then running=true; else running=false; pid=""; fi
+	if [ "$running" = false ] && [ "$init_present" = true ] && "$INIT_PATH" running >/dev/null 2>&1; then
+		running=true
+	fi
+
+	proc_available=false
+	proc_reason="not_running"
+	proc_detail="TorrServer process not found in /proc"
+	rss_kb=0
+	proc_ticks=0
+	ts_cpu="0.0"
+	cores=""
+
+	if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+		proc_available=true
+		proc_reason=""
+		proc_detail=""
+		rss_kb="$(awk '/^VmRSS:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null)"
+		[ -n "$rss_kb" ] || rss_kb=0
+		proc_ticks="$(awk '{ print $14 + $15 }' "/proc/$pid/stat" 2>/dev/null)"
+		[ -n "$proc_ticks" ] || proc_ticks=0
+
+		if [ -r /proc/stat ]; then
+			cur_cpu="$(read_cpu_total)"
+			prev_cpu="$(awk '/^cpu / { print $2; exit }' "$STATE_FILE" 2>/dev/null)"
+			prev_pid="$(awk '/^pid / { print $2; exit }' "$STATE_FILE" 2>/dev/null)"
+			prev_proc="$(awk '/^pid / { print $3; exit }' "$STATE_FILE" 2>/dev/null)"
+			if [ "$prev_pid" = "$pid" ] && [ -n "$cur_cpu" ] && [ -n "$prev_cpu" ] && [ -n "$prev_proc" ]; then
+				d_sys=$((cur_cpu - prev_cpu))
+				d_proc=$((proc_ticks - prev_proc))
+				ncpu="$(cpu_count)"
+				if [ "$d_sys" -gt 0 ] 2>/dev/null; then
+					ts_cpu="$(awk -v dp="$d_proc" -v ds="$d_sys" -v n="$ncpu" 'BEGIN { printf "%.1f", (dp / ds) * 100 * n }')"
+				fi
+			fi
+			cores="$(emit_cores)"
+		else
+			proc_reason="no_procstat"
+			proc_detail="/proc/stat is not readable; per-core CPU unavailable"
+		fi
+	else
+		pid=""
+	fi
+	write_state "$pid" "$proc_ticks"
+
+	if [ -r /proc/meminfo ]; then
+		ram_available=true
+		ram_reason=""
+		ram_detail=""
+		mem_total="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null)"
+		mem_free="$(awk '/^MemFree:/ { print $2; exit }' /proc/meminfo 2>/dev/null)"
+		mem_avail="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null)"
+		[ -n "$mem_total" ] || mem_total=0
+		[ -n "$mem_free" ] || mem_free=0
+		[ -n "$mem_avail" ] || mem_avail="$mem_free"
+		if [ "$mem_total" -gt 0 ] 2>/dev/null; then
+			used_pct="$(awk -v t="$mem_total" -v a="$mem_avail" 'BEGIN { printf "%d", ((t - a) / t) * 100 }')"
+		else
+			used_pct=0
+		fi
+	else
+		ram_available=false
+		ram_reason="no_meminfo"
+		ram_detail="/proc/meminfo is not readable"
+		mem_total=0; mem_free=0; mem_avail=0; used_pct=0
+	fi
+
+	port="$(uci_get torrserver.main.port)"
+	if [ -n "$port" ]; then
+		web_available=true
+		web_reason=""
+		web_detail=""
+	else
+		port=0
+		web_available=false
+		web_reason="port_unset"
+		web_detail="UCI option torrserver.main.port is unset"
+	fi
+
+	[ -n "$cores" ] || cores=""
+	if [ -n "$pid" ]; then pid_json="$pid"; else pid_json=null; fi
+	proc_reason_json="$(printf '%s' "$proc_reason" | json_string)"
+	proc_detail_json="$(printf '%s' "$proc_detail" | json_string)"
+	ram_reason_json="$(printf '%s' "$ram_reason" | json_string)"
+	ram_detail_json="$(printf '%s' "$ram_detail" | json_string)"
+	web_reason_json="$(printf '%s' "$web_reason" | json_string)"
+	web_detail_json="$(printf '%s' "$web_detail" | json_string)"
+	url_hint="http://<session-host>:${port}/"
+	url_hint_json="$(printf '%s' "$url_hint" | json_string)"
+
+	printf '{'
+	printf '"service":{"running":%s,"pid":%s,"enabled":%s,"init_present":%s,"bin_present":%s,"config_present":%s},' \
+		"$running" "$pid_json" "$enabled" "$init_present" "$bin_present" "$config_present"
+	printf '"proc":{"available":%s,"reason":%s,"detail":%s,"rss_kb":%s,"cpu_pct":"%s","cores":[%s]},' \
+		"$proc_available" "$proc_reason_json" "$proc_detail_json" "${rss_kb:-0}" "$ts_cpu" "$cores"
+	printf '"ram":{"available":%s,"reason":%s,"detail":%s,"total_kb":%s,"free_kb":%s,"avail_kb":%s,"used_pct":%s},' \
+		"$ram_available" "$ram_reason_json" "$ram_detail_json" "$mem_total" "$mem_free" "$mem_avail" "$used_pct"
+	printf '"web":{"available":%s,"reason":%s,"detail":%s,"port":%s,"url_hint":%s},' \
+		"$web_available" "$web_reason_json" "$web_detail_json" "$port" "$url_hint_json"
+	printf '"meta":{"backend":"luci.torrserver","cache_ttl":%s}' "$STATUS_TTL"
+	printf '}\n'
+}
+
+method_status() {
+	if cache_is_fresh; then
+		cat "$STATUS_CACHE"
+		return 0
+	fi
+	out="$(method_status_uncached)"
+	printf '%s\n' "$out" > "$STATUS_CACHE.$$" 2>/dev/null && mv "$STATUS_CACHE.$$" "$STATUS_CACHE" 2>/dev/null || true
+	printf '%s\n' "$out"
+}
+
+read_log_file_lines() {
+	log_file="$1"
+	[ -n "$log_file" ] || return 1
+	[ -r "$log_file" ] || return 1
+	tail -n 200 "$log_file" 2>/dev/null
+}
+
+method_log() {
+	logpath="$(uci_get torrserver.main.logpath)"
+	weblogpath="$(uci_get torrserver.main.weblogpath)"
+	lines_raw=""
+	source=""
+
+	if command -v logread >/dev/null 2>&1; then
+		# Fast path: normal procd/syslog entries tagged with lowercase service name.
+		lines_raw="$(logread -e torrserver 2>/dev/null | tail -n 200)"
+		source="logread:torrserver"
+
+		# Upstream daemon and some wrappers may log with capitalized TorrServer.
+		if [ -z "$lines_raw" ]; then
+			lines_raw="$(logread -e TorrServer 2>/dev/null | tail -n 200)"
+			source="logread:TorrServer"
+		fi
+
+		# Last syslog fallback: scan all logread output case-insensitively.
+		# This is slower, so it is only used when filtered logread returns no lines.
+		if [ -z "$lines_raw" ]; then
+			lines_raw="$(logread 2>/dev/null | grep -Ei 'torrserver|TorrServer|/usr/bin/torrserver' | tail -n 200)"
+			source="logread:grep"
+		fi
+	fi
+
+	# If daemon is configured to write to files, use them when syslog has no match
+	# or logread is unavailable. Do not fail the method just because syslog is empty.
+	if [ -z "$lines_raw" ]; then
+		lines_raw="$(read_log_file_lines "$logpath")"
+		[ -n "$lines_raw" ] && source="file:logpath"
+	fi
+	if [ -z "$lines_raw" ]; then
+		lines_raw="$(read_log_file_lines "$weblogpath")"
+		[ -n "$lines_raw" ] && source="file:weblogpath"
+	fi
+
+	if [ -z "$source" ]; then
+		if command -v logread >/dev/null 2>&1; then
+			printf '{"available":true,"reason":"empty","detail":"No TorrServer entries found in logread or configured log files","lines":[],"source":"logread"}\n'
+		else
+			printf '{"available":false,"reason":"no_log_source","detail":"logread is unavailable and configured log files are not readable","lines":[],"source":"none"}\n'
+		fi
+		return 0
+	fi
+
+	lines="$(printf '%s\n' "$lines_raw" | json_line_array)"
+	[ -n "$lines" ] || lines="[]"
+	source_json="$(printf '%s' "$source" | json_string)"
+	printf '{"available":true,"lines":%s,"source":%s}\n' "$lines" "$source_json"
+}
+
+case "$1" in
+	list)
+		printf '{"status":{},"log":{}}\n'
+		;;
+	call)
+		case "$2" in
+			status) method_status ;;
+			log) method_log ;;
+			*) printf '{"error":"unknown method"}\n'; exit 1 ;;
+		esac
+		;;
+	*)
+		printf '{"error":"unknown command"}\n'
+		exit 1
+		;;
+esac

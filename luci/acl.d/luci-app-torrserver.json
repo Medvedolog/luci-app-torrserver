@@ -1,21 +1,30 @@
 {
   "luci-app-torrserver": {
-    "description": "Grant access to TorrServer UCI, service control and optional RPC backend",
+    "description": "Grant access to TorrServer status, diagnostics and service control",
     "read": {
       "ubus": {
-        "luci": [ "getInitList", "getProcessList" ],
-        "torrserver": [ "status", "log" ],
-        "network.interface.lan": [ "status" ],
-        "uci": [ "get", "changes" ]
+        "luci.torrserver": [
+          "status",
+          "log"
+        ],
+        "uci": [
+          "get",
+          "changes"
+        ]
       },
-      "uci": [ "torrserver", "network" ]
+      "uci": [
+        "torrserver"
+      ]
     },
     "write": {
       "ubus": {
-        "luci": [ "setInitAction" ],
-        "torrserver": [ "start", "stop", "restart", "enable", "disable" ]
+        "luci": [
+          "setInitAction"
+        ]
       },
-      "uci": [ "torrserver" ]
+      "uci": [
+        "torrserver"
+      ]
     }
   }
 }

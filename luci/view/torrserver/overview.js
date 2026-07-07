@@ -5,34 +5,14 @@
 'require rpc';
 
 const callStatus = rpc.declare({
-    object: 'torrserver',
+    object: 'luci.torrserver',
     method: 'status',
-    expect: { '': {
-        running: false, pid: null,
-        bin_present: false, init_present: false, config_present: false,
-        mem_kb: 0, ts_cpu: '0.0',
-        sys_mem: { total: 0, free: 0, available: 0 },
-        cores: []
-    }}
+    expect: { '': {} }
 });
 
 const callLog = rpc.declare({
-    object: 'torrserver',
+    object: 'luci.torrserver',
     method: 'log',
-    expect: { '': { log: '' } }
-});
-
-const callStartCustom   = rpc.declare({ object: 'torrserver', method: 'start',   expect: { '': { ok: false } } });
-const callStopCustom    = rpc.declare({ object: 'torrserver', method: 'stop',    expect: { '': { ok: false } } });
-const callRestartCustom = rpc.declare({ object: 'torrserver', method: 'restart', expect: { '': { ok: false } } });
-const callEnableCustom  = rpc.declare({ object: 'torrserver', method: 'enable',  expect: { '': { ok: false } } });
-const callDisableCustom = rpc.declare({ object: 'torrserver', method: 'disable', expect: { '': { ok: false } } });
-
-
-const callInitList = rpc.declare({
-    object: 'luci',
-    method: 'getInitList',
-    params: [ 'name' ],
     expect: { '': {} }
 });
 
@@ -41,12 +21,6 @@ const callInitActionRaw = rpc.declare({
     method: 'setInitAction',
     params: [ 'name', 'action' ],
     expect: { result: false }
-});
-
-const callProcessList = rpc.declare({
-    object: 'luci',
-    method: 'getProcessList',
-    expect: { result: [] }
 });
 
 function callInitAction(action) {
@@ -62,27 +36,10 @@ const callRestart = function() { return callInitAction('restart'); };
 const callEnable  = function() { return callInitAction('enable'); };
 const callDisable = function() { return callInitAction('disable'); };
 
-const callNetworkStatus = rpc.declare({
-    object: 'network.interface.lan',
-    method: 'status',
-    expect: { '': {} }
-});
-
 function fmtMb(kb, digits) {
+    if (kb === null || kb === undefined || kb === '')
+        return '—';
     return ((+kb || 0) / 1024).toFixed(digits == null ? 1 : digits);
-}
-
-function getLanIp() {
-    return callNetworkStatus().then(function(res) {
-        /* Берём первый IPv4 адрес из runtime статуса интерфейса */
-        const addrs = res && res['ipv4-address'];
-        if (addrs && addrs.length > 0 && addrs[0].address)
-            return addrs[0].address;
-        /* Fallback на UCI */
-        return uci.get('network', 'lan', 'ipaddr') || '192.168.1.1';
-    }).catch(function() {
-        return uci.get('network', 'lan', 'ipaddr') || '192.168.1.1';
-    });
 }
 
 function hostForUrl(host) {
@@ -92,13 +49,8 @@ function hostForUrl(host) {
     return host;
 }
 
-function buildWebUrl(port, lanIp) {
-    /*
-     * Предпочитаем hostname текущей LuCI-сессии. Если LuCI открыт через
-     * Tailscale/VPN/проброс, LAN IP роутера из network.lan часто недоступен
-     * браузеру пользователя.
-     */
-    const host = (window.location && window.location.hostname) || lanIp || '192.168.1.1';
+function buildWebUrl(port) {
+    const host = (window.location && window.location.hostname) || '192.168.1.1';
     return 'http://' + hostForUrl(host) + ':' + (port || '8090') + '/';
 }
 
@@ -107,72 +59,53 @@ function rpcErrorHint(err) {
     if (/access denied|permission denied|403/i.test(msg))
         return msg + ' — проверьте ACL luci-app-torrserver и перезапустите rpcd.';
     if (/object not found|not found/i.test(msg))
-        return msg + ' — custom backend не зарегистрирован; service actions выполняются через штатный объект luci.';
+        return msg + ' — backend luci.torrserver не зарегистрирован; проверьте /usr/libexec/rpcd/luci.torrserver и перезапустите rpcd.';
     return msg;
 }
 
-
-function firstValue(obj, keys) {
-    for (let i = 0; i < keys.length; i++) {
-        if (obj && obj[keys[i]] != null)
-            return obj[keys[i]];
-    }
-    return null;
-}
-
-function processCommand(p) {
-    const cmd = firstValue(p, [ 'command', 'COMMAND', 'cmd', 'cmdline', 'args', 'name' ]);
-    if (Array.isArray(cmd))
-        return cmd.join(' ');
-    return String(cmd || '');
-}
-
-function findTorrServerProcess(list) {
-    if (!Array.isArray(list))
-        list = list && typeof(list) === 'object' ? Object.keys(list).map(function(k) { return list[k]; }) : [];
-
-    for (let i = 0; i < list.length; i++) {
-        const p = list[i] || {};
-        const cmd = processCommand(p);
-        if (cmd.indexOf('/usr/bin/torrserver') >= 0 || /(^|\s)torrserver(\s|$)/.test(cmd))
-            return p;
-    }
-    return null;
-}
-
-function fallbackStatus() {
-    return Promise.all([
-        callInitList('torrserver').catch(function() { return {}; }),
-        callProcessList().catch(function() { return []; })
-    ]).then(function(data) {
-        const init = data[0] || {};
-        const plist = data[1] || [];
-        const initObj = init.torrserver || (init.result && init.result.torrserver) || null;
-        const proc = findTorrServerProcess(plist);
-        const pid = proc ? +(firstValue(proc, [ 'pid', 'PID' ]) || 0) : null;
-        const rss = proc ? +(firstValue(proc, [ 'rss', 'RSS', 'res', 'RES', 'mem_kb' ]) || 0) : 0;
-        const cpu = proc ? +(firstValue(proc, [ 'cpu_percent', 'cpu', '%CPU', 'pcpu' ]) || 0) : 0;
-
-        return {
-            running: !!proc,
-            pid: pid || null,
-            bin_present: true,
-            init_present: initObj ? true : false,
-            config_present: uci.get('torrserver', 'main') != null || true,
-            mem_kb: rss,
-            ts_cpu: isNaN(cpu) ? '0.0' : cpu.toFixed(1),
-            sys_mem: { total: 0, free: 0, available: 0 },
-            cores: [],
-            fallback_status: true,
-            rpc_missing: true
-        };
-    });
+function backendErrorStatus(err) {
+    const detail = rpcErrorHint(err);
+    return {
+        backend_error: true,
+        error_message: detail,
+        service: {
+            running: false,
+            pid: null,
+            enabled: false,
+            bin_present: null,
+            init_present: null,
+            config_present: null
+        },
+        proc: {
+            available: false,
+            reason: 'backend_unavailable',
+            detail: detail,
+            rss_kb: 0,
+            cpu_pct: '0.0',
+            cores: []
+        },
+        ram: {
+            available: false,
+            reason: 'backend_unavailable',
+            detail: detail,
+            total_kb: 0,
+            free_kb: 0,
+            avail_kb: 0,
+            used_pct: 0
+        },
+        web: {
+            available: false,
+            reason: 'backend_unavailable',
+            detail: detail,
+            port: 0,
+            url_hint: ''
+        },
+        meta: { backend: 'unavailable', cache_ttl: 0 }
+    };
 }
 
 function getStatus() {
-    return callStatus().catch(function() {
-        return fallbackStatus();
-    });
+    return callStatus();
 }
 
 return view.extend({
@@ -181,15 +114,7 @@ return view.extend({
     load: function() {
         return Promise.all([
             uci.load('torrserver').catch(function() { return null; }),
-            getLanIp(),
-            getStatus().catch(function() { return {
-                running: false, pid: null,
-                bin_present: null, init_present: null, config_present: null,
-                mem_kb: 0, ts_cpu: '0.0',
-                sys_mem: { total: 0, free: 0, available: 0 },
-                cores: [],
-                status_error: true
-            }; })
+            getStatus().catch(function(err) { return backendErrorStatus(err); })
         ]);
     },
 
@@ -202,11 +127,11 @@ return view.extend({
 
     render: function(data) {
         const self = this;
-        const lanIp  = data[1] || '192.168.1.1';
-        const initial = data[2] || {};
-        const port   = uci.get('torrserver', 'main', 'port') || '8090';
-        function currentWebUrl() {
-            return buildWebUrl(uci.get('torrserver', 'main', 'port') || port, lanIp);
+        const initial = data[1] || {};
+        const port   = (initial.web && initial.web.port) || uci.get('torrserver', 'main', 'port') || '8090';
+        function currentWebUrl(st) {
+            const web = st && st.web || {};
+            return buildWebUrl(web.port || uci.get('torrserver', 'main', 'port') || port);
         }
 
         const root     = E('div', { class: 'ts-root' });
@@ -219,7 +144,7 @@ return view.extend({
         const ctrlPanel = E('div', { class: 'ts-ctrl' });
         const openBtn   = E('a', {
             class: 'cbi-button cbi-button-neutral ts-webui-btn',
-            href: currentWebUrl(),
+            href: currentWebUrl(initial),
             target: '_blank',
             rel: 'noopener noreferrer',
             title: 'Открыть Web UI TorrServer по адресу текущей LuCI-сессии. Если LuCI открыт через VPN/Tailscale, это надёжнее, чем LAN IP.'
@@ -264,6 +189,7 @@ return view.extend({
         logBox.style.display = 'none';
         const logBtn = E('button', {
             class: 'cbi-button cbi-button-neutral',
+            type: 'button',
             style: 'margin-top:10px',
             click: function() {
                 logVisible = !logVisible;
@@ -335,43 +261,52 @@ return view.extend({
 
         function renderBanner(st) {
             while (banner.firstChild) banner.removeChild(banner.firstChild);
+            const svc = st && st.service || {};
 
-            if (st.bin_present === null || st.init_present === null || st.config_present === null) {
+            if (st && st.backend_error) {
                 banner.appendChild(E('div', { class: 'ts-error' }, [
-                    E('strong', {}, 'RPC статус недоступен.'),
+                    E('strong', {}, 'Backend luci.torrserver недоступен.'),
                     E('br'), E('br'),
-                    E('span', {}, 'Custom ubus object torrserver не зарегистрирован. Управление будет выполняться через штатный luci.setInitAction; для полного статуса проверьте /usr/libexec/rpcd/torrserver.')
+                    E('span', {}, st.error_message || 'Проверьте rpcd и /usr/libexec/rpcd/luci.torrserver.')
                 ]));
                 return;
             }
 
-            if (st.bin_present && st.init_present && st.config_present) return;
+            if (svc.bin_present === null || svc.init_present === null || svc.config_present === null) {
+                banner.appendChild(E('div', { class: 'ts-error' }, [
+                    E('strong', {}, 'RPC статус недоступен.'),
+                    E('br'), E('br'),
+                    E('span', {}, 'Нет полного ответа от luci.torrserver/status. Проверьте /usr/libexec/rpcd/luci.torrserver list и статус rpcd.')
+                ]));
+                return;
+            }
+
+            if (svc.bin_present && svc.init_present && svc.config_present) return;
 
             banner.appendChild(E('div', { class: 'ts-warn' }, [
                 E('strong', {}, 'Не все компоненты TorrServer установлены.'),
                 E('br'), E('br'),
                 E('span', {}, '/usr/bin/torrserver: '),
-                E('b', {}, st.bin_present  ? '✓ OK' : '✗ MISSING'), E('br'),
+                E('b', {}, svc.bin_present  ? '✓ OK' : '✗ MISSING'), E('br'),
                 E('span', {}, '/etc/init.d/torrserver: '),
-                E('b', {}, st.init_present ? '✓ OK' : '✗ MISSING'), E('br'),
+                E('b', {}, svc.init_present ? '✓ OK' : '✗ MISSING'), E('br'),
                 E('span', {}, '/etc/config/torrserver: '),
-                E('b', {}, st.config_present ? '✓ OK' : '✗ MISSING')
+                E('b', {}, svc.config_present ? '✓ OK' : '✗ MISSING')
             ]));
         }
 
         function renderCtrl(st) {
             while (ctrlPanel.firstChild) ctrlPanel.removeChild(ctrlPanel.firstChild);
+            const svc = st && st.service || {};
 
-            /* Web UI не блокируем из-за сбоя custom RPC: порт может быть доступен,
-             * даже если статус получен fallback-методом или не получен вообще. */
-            openBtn.href = currentWebUrl();
-            const canOpenWeb = st.bin_present !== false && st.init_present !== false;
+            openBtn.href = currentWebUrl(st);
+            const canOpenWeb = svc.bin_present !== false && svc.init_present !== false;
             if (canOpenWeb) {
                 openBtn.classList.remove('disabled');
                 openBtn.style.opacity = '1';
                 openBtn.style.pointerEvents = '';
-                openBtn.title = st.running ? ('Открыть ' + currentWebUrl())
-                    : ('Открыть ' + currentWebUrl() + ' — сервис может быть остановлен');
+                openBtn.title = svc.running ? ('Открыть ' + currentWebUrl(st))
+                    : ('Открыть ' + currentWebUrl(st) + ' — сервис может быть остановлен');
             } else {
                 openBtn.classList.add('disabled');
                 openBtn.style.opacity = '0.4';
@@ -379,22 +314,22 @@ return view.extend({
                 openBtn.title = 'Web UI недоступен: daemon или init script отсутствует';
             }
 
-            const canCtrl = !!(st.bin_present && st.init_present);
+            const canCtrl = !!(svc.bin_present && svc.init_present);
             if (!canCtrl) {
                 ctrlPanel.appendChild(E('button', {
-                    class: 'cbi-button ts-btn-disabled', disabled: true
+                    class: 'cbi-button ts-btn-disabled', type: 'button', disabled: 'disabled'
                 }, 'daemon missing'));
                 return;
             }
 
             function mkBtn(label, cls, fn) {
-                return E('button', {
+                const attrs = {
                     class: 'cbi-button ts-btn-' + cls,
-                    disabled: !!pendingAction,
+                    type: 'button',
                     click: function(ev) {
                         ev.preventDefault();
                         pendingAction = cls;
-                        pidBeforeAction = lastStatus ? lastStatus.pid : null;
+                        pidBeforeAction = lastStatus && lastStatus.service ? lastStatus.service.pid : null;
                         fastUntil = Date.now() + 15000;
                         setPendingTimeout();
                         renderStatus(st);
@@ -411,7 +346,6 @@ return view.extend({
                                 ui.addNotification(null, E('p', {}, 'Не удалось выполнить ' + cls + hint), 'danger');
                                 return;
                             }
-                            /* backend уже верифицировал — сбрасываем pending и обновляем */
                             pendingAction = null;
                             tick();
                         }).catch(function(err) {
@@ -423,10 +357,13 @@ return view.extend({
                             ui.addNotification(null, E('p', {}, 'RPC ошибка: ' + rpcErrorHint(err)), 'danger');
                         });
                     }
-                }, label);
+                };
+                if (pendingAction)
+                    attrs.disabled = 'disabled';
+                return E('button', attrs, label);
             }
 
-            if (st.running) {
+            if (svc.running) {
                 ctrlPanel.appendChild(mkBtn('Stop',    'stop',    callStop));
                 ctrlPanel.appendChild(mkBtn('Restart', 'restart', callRestart));
             } else {
@@ -435,67 +372,82 @@ return view.extend({
         }
 
         function renderStatus(st) {
-            if (st.bin_present === null || st.init_present === null) {
+            const svc = st && st.service || {};
+            if (st && st.backend_error) {
                 statusVal.textContent = 'RPC ERROR';
                 statusVal.className = 'ts-val ts-state-warn';
                 pidVal.textContent = '';
                 return;
             }
-            if (!(st.bin_present && st.init_present)) {
+            if (svc.bin_present === null || svc.init_present === null) {
+                statusVal.textContent = 'RPC ERROR';
+                statusVal.className = 'ts-val ts-state-warn';
+                pidVal.textContent = '';
+                return;
+            }
+            if (!(svc.bin_present && svc.init_present)) {
                 statusVal.textContent = 'NO DAEMON';
                 statusVal.className = 'ts-val ts-state-warn';
                 pidVal.textContent = '';
                 return;
             }
             if (pendingAction === 'start') {
-                statusVal.textContent = st.running ? 'ЗАПУЩЕН' : 'STARTING...';
-                statusVal.className = 'ts-val ' + (st.running ? 'ts-state-run' : 'ts-state-warn');
+                statusVal.textContent = svc.running ? 'ЗАПУЩЕН' : 'STARTING...';
+                statusVal.className = 'ts-val ' + (svc.running ? 'ts-state-run' : 'ts-state-warn');
             } else if (pendingAction === 'stop') {
-                statusVal.textContent = st.running ? 'STOPPING...' : 'ОСТАНОВЛЕН';
-                statusVal.className = 'ts-val ' + (st.running ? 'ts-state-warn' : 'ts-state-stop');
+                statusVal.textContent = svc.running ? 'STOPPING...' : 'ОСТАНОВЛЕН';
+                statusVal.className = 'ts-val ' + (svc.running ? 'ts-state-warn' : 'ts-state-stop');
             } else if (pendingAction === 'restart') {
                 statusVal.textContent = 'RESTARTING...';
                 statusVal.className = 'ts-val ts-state-warn';
-            } else if (st.running) {
+            } else if (svc.running) {
                 statusVal.textContent = 'ЗАПУЩЕН';
                 statusVal.className = 'ts-val ts-state-run';
             } else {
                 statusVal.textContent = 'ОСТАНОВЛЕН';
                 statusVal.className = 'ts-val ts-state-stop';
             }
-            pidVal.textContent = st.pid ? ('PID ' + st.pid) : '';
+            pidVal.textContent = svc.pid ? ('PID ' + svc.pid) : '';
         }
 
         function renderMetrics(st) {
-            const running = !!st.running;
-            const total   = +(st.sys_mem && st.sys_mem.total     || 0);
-            const avail   = +(st.sys_mem && st.sys_mem.available || 0);
-            const memKb   = +(st.mem_kb  || 0);
-            const cpuPct  = parseFloat(st.ts_cpu || '0') || 0;
-            const cores   = Array.isArray(st.cores) ? st.cores : [];
+            const svc = st && st.service || {};
+            const proc = st && st.proc || {};
+            const ram = st && st.ram || {};
+            const procAvail = !!proc.available;
+            const ramAvail = !!ram.available;
+            const total = +(ram.total_kb || 0);
+            const avail = +(ram.avail_kb || 0);
+            const rssKb = +(proc.rss_kb || 0);
+            const cpuPct = parseFloat(proc.cpu_pct || '0') || 0;
+            const cores = Array.isArray(proc.cores) ? proc.cores : [];
 
-            memVal.textContent = running ? fmtMb(memKb, 1) : '0.0';
-            memDetails.textContent = total > 0
+            memVal.textContent = procAvail ? fmtMb(rssKb, 1) : '—';
+            memDetails.textContent = ramAvail && total > 0
                 ? ('Free: ' + fmtMb(avail, 0) + ' MB | Total: ' + fmtMb(total, 0) + ' MB')
                 : 'Free: — | Total: —';
-            memBar.style.width = (running && total > 0)
-                ? Math.max((memKb / total) * 100, 1) + '%' : '0%';
-            cpuVal.textContent = running ? cpuPct.toFixed(1) : '0.0';
+            memBar.style.width = ramAvail ? Math.min(Math.max(+(ram.used_pct || 0), 0), 100) + '%' : '0%';
+            cpuVal.textContent = procAvail ? cpuPct.toFixed(1) : '—';
 
             ensureCoreColumns(cores.length);
             coresTxt.textContent = cores.length ? cores.map(function(v, i) {
                 setBar(i, v);
                 return 'CPU' + i + ': ' + (+v).toFixed(1) + '%';
-            }).join(' | ') : '—';
+            }).join(' | ') : (procAvail ? '—' : (proc.detail || '—'));
         }
 
         function refreshLog() {
             if (!logVisible) return;
             callLog().then(function(res) {
-                logBox.textContent = (res && res.log) ? res.log : 'Лог пуст.';
+                if (!res || res.available === false) {
+                    logBox.textContent = (res && (res.detail || res.reason)) || 'Лог недоступен.';
+                    return;
+                }
+                const lines = Array.isArray(res.lines) ? res.lines : [];
+                logBox.textContent = lines.length ? lines.join('\n') : 'Лог пуст.';
                 logBox.scrollTop = logBox.scrollHeight;
             }).catch(function(err) {
-                logBox.textContent = 'Лог недоступен: custom ubus object torrserver не зарегистрирован. Для логов используйте logread -e torrserver.';
+                logBox.textContent = 'Лог недоступен: ' + rpcErrorHint(err);
             });
         }
 
@@ -509,7 +461,13 @@ return view.extend({
                 renderMetrics(st);
                 refreshLog();
             }).catch(function(err) {
-                showError('Ошибка обновления статуса: ' + err.message);
+                const st = backendErrorStatus(err);
+                lastStatus = st;
+                showError('Ошибка обновления статуса: ' + rpcErrorHint(err));
+                renderBanner(st);
+                renderStatus(st);
+                renderCtrl(st);
+                renderMetrics(st);
             });
         }
 
@@ -560,18 +518,21 @@ return view.extend({
         function chk(opt, def, help) {
             const val = uci.get('torrserver', 'main', opt);
             const checked = val !== undefined ? val === '1' : def === '1';
-            return E('input', {
-                type: 'checkbox', checked: checked, class: 'ts-chk', title: help || '',
+            const attrs = {
+                type: 'checkbox', class: 'ts-chk', title: help || '',
                 change: function() { uci.set('torrserver', 'main', opt, this.checked ? '1' : '0'); }
-            });
+            };
+            if (checked)
+                attrs.checked = 'checked';
+            return E('input', attrs);
         }
 
         /* Чекбокс автозапуска — синхронизирует и UCI и rc.d enable/disable */
         function chkAutostart() {
             const val = uci.get('torrserver', 'main', 'enabled');
             const checked = val !== undefined ? val === '1' : true;
-            return E('input', {
-                type: 'checkbox', checked: checked, class: 'ts-chk',
+            const attrs = {
+                type: 'checkbox', class: 'ts-chk',
                 title: 'Сохраняет UCI option enabled и синхронизирует /etc/init.d/torrserver enable/disable.',
                 change: function() {
                     const en = this.checked;
@@ -581,7 +542,10 @@ return view.extend({
                         ui.addNotification(null, E('p', {}, 'Не удалось изменить автозапуск: ' + rpcErrorHint(err)), 'danger');
                     });
                 }
-            });
+            };
+            if (checked)
+                attrs.checked = 'checked';
+            return E('input', attrs);
         }
 
         function sel(opt, options, def, help) {
@@ -592,7 +556,10 @@ return view.extend({
             }, options.map(function(o) {
                 const value = Array.isArray(o) ? o[0] : o;
                 const text  = Array.isArray(o) ? o[1] : o;
-                return E('option', { value: value, selected: value === cur }, text);
+                const attrs = { value: value };
+                if (value === cur)
+                    attrs.selected = 'selected';
+                return E('option', attrs, text);
             }));
         }
 
@@ -638,6 +605,7 @@ return view.extend({
         wrap.appendChild(E('div', { class: 'ts-save-row' }, [
             E('button', {
                 class: 'cbi-button cbi-button-apply',
+                type: 'button',
                 click: function() {
                     uci.save().then(function() {
                         return uci.apply(30);
@@ -646,7 +614,7 @@ return view.extend({
                         /* После apply — обновляем статус чтобы убедиться что сервис поднялся */
                         setTimeout(function() {
                             getStatus().then(function(st) {
-                                if (st && !st.running && st.bin_present && st.init_present) {
+                                if (st && st.service && !st.service.running && st.service.bin_present && st.service.init_present) {
                                     ui.addNotification(null,
                                         E('p', {}, 'Внимание: сервис не запущен после применения настроек.'),
                                         'warning');
@@ -660,6 +628,7 @@ return view.extend({
             }, 'Применить'),
             E('button', {
                 class: 'cbi-button cbi-button-save',
+                type: 'button',
                 click: function() {
                     uci.save().then(function() {
                         ui.addNotification(null, E('p', {}, 'Настройки сохранены.'), 'info');
@@ -670,6 +639,7 @@ return view.extend({
             }, 'Сохранить'),
             E('button', {
                 class: 'cbi-button cbi-button-reset',
+                type: 'button',
                 click: function() {
                     uci.unload('torrserver');
                     uci.load('torrserver').then(function() {
