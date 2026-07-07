@@ -6,7 +6,7 @@
 
 ## Что это за проект
 
-Два пакета для OpenWrt ARM64:
+Два пакета для OpenWrt ARM64 и x86_64:
 
 - **`torrserver`** / **`torrserver-upx`** — daemon-пакет: бинарник, init.d, UCI конфиг
 - **`luci-app-torrserver`** — LuCI companion UI: статус, кнопки управления, метрики, лог, UCI настройки
@@ -17,9 +17,9 @@
 
 ## Целевые платформы
 
-- OpenWrt 24.10.x (ipk + apk)
+- OpenWrt 24.10.x (ipk)
 - OpenWrt 25.12 (apk, пакетный менеджер apk вместо opkg)
-- Архитектура: `aarch64_generic`, `aarch64_cortex-a53`
+- Архитектуры daemon-пакета: `aarch64_generic`, `aarch64_cortex-a53`, `x86_64`
 
 ---
 

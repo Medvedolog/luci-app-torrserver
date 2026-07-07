@@ -40,7 +40,7 @@ const callInitActionRaw = rpc.declare({
     object: 'luci',
     method: 'setInitAction',
     params: [ 'name', 'action' ],
-    expect: { '': { result: false } }
+    expect: { result: false }
 });
 
 const callProcessList = rpc.declare({
@@ -51,8 +51,8 @@ const callProcessList = rpc.declare({
 
 function callInitAction(action) {
     return callInitActionRaw('torrserver', action).then(function(res) {
-        const ok = !!(res && (res.result === true || res.result === 1));
-        return { ok: ok, detail: ok ? action : ((res && res.error) || 'init_action_failed') };
+        const ok = (res === true);
+        return { ok: ok, detail: ok ? action : 'init_action_failed' };
     });
 }
 

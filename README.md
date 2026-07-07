@@ -85,6 +85,7 @@ Workflow умеет брать:
 
 - `torrserver_141_aarch64_generic.ipk`
 - `torrserver_141_aarch64_cortex-a53.ipk`
+- `torrserver_141_x86_64.ipk`
 
 Для нерелизных ref используется fallback-версия вида:
 
@@ -95,12 +96,13 @@ Workflow умеет брать:
 ## Какие архитектуры собираются
 
 ### Для daemon-пакета
-Собираются пакеты сразу для двух OpenWrt arch-имен при одном и том же arm64-musl бинарнике:
+Собираются daemon-пакеты для трёх OpenWrt arch-имён:
 
-- `aarch64_generic`
-- `aarch64_cortex-a53`
+- `aarch64_generic` — linux/arm64 бинарник
+- `aarch64_cortex-a53` — тот же linux/arm64 бинарник, отдельная OpenWrt arch-метка
+- `x86_64` — отдельный linux/amd64 бинарник
 
-Это удобно, потому что сам бинарник общий, а package metadata уже подходит под разные OpenWrt target-ветки.
+Это покрывает ARM64-роутеры и x86_64-сборки OpenWrt. Для `x86_64` workflow делает отдельную Go-сборку с `GOARCH=amd64` и, при необходимости, отдельный официальный upstream asset `TorrServer-linux-amd64`.
 
 ### Для LuCI-пакета
 `luci-app-torrserver` — это **noarch** пакет:
@@ -303,9 +305,11 @@ Workflow собирает:
 - `ipk` для:
   - `aarch64_generic`
   - `aarch64_cortex-a53`
+  - `x86_64`
 - `apk` для:
   - `aarch64_generic`
   - `aarch64_cortex-a53`
+  - `x86_64`
 
 Также генерируется:
 
