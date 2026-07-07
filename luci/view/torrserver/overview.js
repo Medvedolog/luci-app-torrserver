@@ -51,6 +51,32 @@ function getLanIp() {
     });
 }
 
+function hostForUrl(host) {
+    host = host || '';
+    if (host.indexOf(':') >= 0 && host.charAt(0) !== '[')
+        return '[' + host + ']';
+    return host;
+}
+
+function buildWebUrl(port, lanIp) {
+    /*
+     * Предпочитаем hostname текущей LuCI-сессии. Если LuCI открыт через
+     * Tailscale/VPN/проброс, LAN IP роутера из network.lan часто недоступен
+     * браузеру пользователя.
+     */
+    const host = (window.location && window.location.hostname) || lanIp || '192.168.1.1';
+    return 'http://' + hostForUrl(host) + ':' + (port || '8090') + '/';
+}
+
+function rpcErrorHint(err) {
+    const msg = err && err.message ? err.message : String(err || 'unknown error');
+    if (/access denied|permission denied|403/i.test(msg))
+        return msg + ' — проверьте ACL luci-app-torrserver и перезапустите rpcd.';
+    if (/object not found|not found/i.test(msg))
+        return msg + ' — проверьте /usr/libexec/rpcd/torrserver и restart rpcd.';
+    return msg;
+}
+
 return view.extend({
     _pollTimer: null,
 
@@ -81,7 +107,9 @@ return view.extend({
         const lanIp  = data[1] || '192.168.1.1';
         const initial = data[2] || {};
         const port   = uci.get('torrserver', 'main', 'port') || '8090';
-        const webUrl = 'http://' + lanIp + ':' + port;
+        function currentWebUrl() {
+            return buildWebUrl(uci.get('torrserver', 'main', 'port') || port, lanIp);
+        }
 
         const root     = E('div', { class: 'ts-root' });
         const banner   = E('div', { id: 'ts-banner' });
@@ -91,9 +119,12 @@ return view.extend({
         const statusVal = E('div', { class: 'ts-val' }, '...');
         const pidVal    = E('small', { class: 'ts-pid' }, '');
         const ctrlPanel = E('div', { class: 'ts-ctrl' });
-        const openBtn   = E('button', {
+        const openBtn   = E('a', {
             class: 'cbi-button cbi-button-neutral ts-webui-btn',
-            click: function() { window.open(webUrl, '_blank', 'noopener'); }
+            href: currentWebUrl(),
+            target: '_blank',
+            rel: 'noopener noreferrer',
+            title: 'Открыть Web UI TorrServer по адресу текущей LuCI-сессии. Если LuCI открыт через VPN/Tailscale, это надёжнее, чем LAN IP.'
         }, '↗ Web UI');
 
         wrap.appendChild(E('div', { class: 'ts-card ts-card-status' }, [
@@ -233,9 +264,19 @@ return view.extend({
         function renderCtrl(st) {
             while (ctrlPanel.firstChild) ctrlPanel.removeChild(ctrlPanel.firstChild);
 
-            /* Web UI кнопка — только если сервис запущен */
-            openBtn.disabled = !st.running;
-            openBtn.style.opacity = st.running ? '1' : '0.4';
+            /* Web UI ссылка — только если сервис запущен */
+            openBtn.href = currentWebUrl();
+            if (st.running) {
+                openBtn.classList.remove('disabled');
+                openBtn.style.opacity = '1';
+                openBtn.style.pointerEvents = '';
+                openBtn.title = 'Открыть ' + currentWebUrl();
+            } else {
+                openBtn.classList.add('disabled');
+                openBtn.style.opacity = '0.4';
+                openBtn.style.pointerEvents = 'none';
+                openBtn.title = 'Web UI доступен только когда TorrServer запущен';
+            }
 
             const canCtrl = !!(st.bin_present && st.init_present);
             if (!canCtrl) {
@@ -266,6 +307,7 @@ return view.extend({
                                 const hint = reply && reply.detail
                                     ? ' (' + reply.detail + ')' : '';
                                 showError('Не удалось выполнить ' + cls + hint);
+                                ui.addNotification(null, E('p', {}, 'Не удалось выполнить ' + cls + hint), 'danger');
                                 return;
                             }
                             /* backend уже верифицировал — сбрасываем pending и обновляем */
@@ -276,7 +318,8 @@ return view.extend({
                             pendingAction = null;
                             renderStatus(lastStatus || st);
                             renderCtrl(lastStatus || st);
-                            showError('Ошибка: ' + err.message);
+                            showError('Ошибка: ' + rpcErrorHint(err));
+                            ui.addNotification(null, E('p', {}, 'RPC ошибка: ' + rpcErrorHint(err)), 'danger');
                         });
                     }
                 }, label);
@@ -390,18 +433,24 @@ return view.extend({
         const self = this;
         const wrap = E('div', { class: 'ts-settings' });
 
-        function row(label, el) {
+        function row(label, el, help) {
+            const labelNode = E('label', { class: 'ts-label', title: help || '' }, [
+                label,
+                help ? E('span', { class: 'ts-help', title: help }, '?') : ''
+            ]);
+            const fieldNodes = [ el ];
+            if (help) fieldNodes.push(E('div', { class: 'ts-hint' }, help));
             return E('div', { class: 'ts-row' }, [
-                E('label', { class: 'ts-label' }, label),
-                E('div', { class: 'ts-field' }, [ el ])
+                labelNode,
+                E('div', { class: 'ts-field' }, fieldNodes)
             ]);
         }
 
-        function inp(opt, placeholder, type, min, max) {
+        function inp(opt, placeholder, type, min, max, help) {
             const val = uci.get('torrserver', 'main', opt) || '';
             const attrs = {
                 class: 'cbi-input-text', type: type || 'text',
-                value: val, placeholder: placeholder || '',
+                value: val, placeholder: placeholder || '', title: help || '',
                 input: function() { uci.set('torrserver', 'main', opt, this.value); }
             };
             if (min !== undefined) attrs.min = String(min);
@@ -409,11 +458,11 @@ return view.extend({
             return E('input', attrs);
         }
 
-        function chk(opt, def) {
+        function chk(opt, def, help) {
             const val = uci.get('torrserver', 'main', opt);
             const checked = val !== undefined ? val === '1' : def === '1';
             return E('input', {
-                type: 'checkbox', checked: checked, class: 'ts-chk',
+                type: 'checkbox', checked: checked, class: 'ts-chk', title: help || '',
                 change: function() { uci.set('torrserver', 'main', opt, this.checked ? '1' : '0'); }
             });
         }
@@ -424,30 +473,39 @@ return view.extend({
             const checked = val !== undefined ? val === '1' : true;
             return E('input', {
                 type: 'checkbox', checked: checked, class: 'ts-chk',
+                title: 'Сохраняет UCI option enabled и синхронизирует /etc/init.d/torrserver enable/disable.',
                 change: function() {
                     const en = this.checked;
                     uci.set('torrserver', 'main', 'enabled', en ? '1' : '0');
                     /* Синхронизируем rc.d */
-                    (en ? callEnable() : callDisable()).catch(function() {});
+                    (en ? callEnable() : callDisable()).catch(function(err) {
+                        ui.addNotification(null, E('p', {}, 'Не удалось изменить автозапуск: ' + rpcErrorHint(err)), 'danger');
+                    });
                 }
             });
         }
 
-        function sel(opt, options, def) {
+        function sel(opt, options, def, help) {
             const cur = uci.get('torrserver', 'main', opt) || def;
             return E('select', {
-                class: 'cbi-input-select',
+                class: 'cbi-input-select', title: help || '',
                 change: function() { uci.set('torrserver', 'main', opt, this.value); }
             }, options.map(function(o) {
-                return E('option', { value: o, selected: o === cur }, o);
+                const value = Array.isArray(o) ? o[0] : o;
+                const text  = Array.isArray(o) ? o[1] : o;
+                return E('option', { value: value, selected: value === cur }, text);
             }));
         }
 
         wrap.appendChild(E('h3', { class: 'ts-section-title' }, 'Основные настройки'));
-        wrap.appendChild(row('Автозапуск',         chkAutostart()));
-        wrap.appendChild(row('Порт',               inp('port', '8090', 'number', 1, 65535)));
-        wrap.appendChild(row('Рабочая директория', inp('path', '/opt/torrserver')));
-        wrap.appendChild(row('Режим прокси',       sel('proxymode', ['tracker','peers','full'], 'tracker')));
+        wrap.appendChild(row('Автозапуск',         chkAutostart(), 'Включает запуск TorrServer при старте OpenWrt и UCI-флаг enabled.'));
+        wrap.appendChild(row('Порт',               inp('port', '8090', 'number', 1, 65535, 'HTTP/Web UI порт TorrServer. После изменения нажмите Применить.'), 'HTTP/Web UI порт TorrServer. Диапазон 1–65535.'));
+        wrap.appendChild(row('Рабочая директория', inp('path', '/opt/torrserver', 'text', undefined, undefined, 'Каталог данных TorrServer: база, кеш и служебные файлы.'), 'Каталог данных TorrServer: база, кеш и служебные файлы.'));
+        wrap.appendChild(row('Режим прокси',       sel('proxymode', [
+            ['tracker', 'tracker — проксировать только tracker-запросы'],
+            ['peers',   'peers — проксировать peer-соединения'],
+            ['full',    'full — tracker + peers']
+        ], 'tracker', 'Режим проксирования TorrServer.'), 'Режим проксирования: tracker, peers или full.'));
 
         const advBody  = E('div', { style: 'display:none' });
         const advTitle = E('h3', {
@@ -459,22 +517,22 @@ return view.extend({
             }
         }, '▶ Дополнительные настройки');
 
-        advBody.appendChild(row('IP для bind',         inp('ip', '0.0.0.0')));
-        advBody.appendChild(row('--dontkill',          chk('dontkill', '1')));
-        advBody.appendChild(row('HTTP auth',           chk('httpauth', '0')));
-        advBody.appendChild(row('RDB режим',           chk('rdb', '0')));
-        advBody.appendChild(row('Путь к логу',         inp('logpath', '/tmp/torrserver.log')));
-        advBody.appendChild(row('Путь к web-логу',     inp('weblogpath', '/tmp/torrserver-web.log')));
-        advBody.appendChild(row('Каталог torrents',    inp('torrentsdir', '/opt/torrserver/torrents')));
-        advBody.appendChild(row('Torrent listen addr', inp('torrentaddr', 'example.com:6881')));
-        advBody.appendChild(row('Публичный IPv4',      inp('pubipv4', '')));
-        advBody.appendChild(row('Публичный IPv6',      inp('pubipv6', '')));
-        advBody.appendChild(row('Web/API поиск',       chk('searchwa', '0')));
-        advBody.appendChild(row('Макс. размер',        inp('maxsize', '64M')));
-        advBody.appendChild(row('Telegram',            inp('tg', '')));
-        advBody.appendChild(row('FUSE',                inp('fuse', '')));
-        advBody.appendChild(row('WebDAV',              chk('webdav', '0')));
-        advBody.appendChild(row('Proxy URL',           inp('proxyurl', 'http://127.0.0.1:8080')));
+        advBody.appendChild(row('IP для bind',         inp('ip', '0.0.0.0', 'text', undefined, undefined, 'Адрес, на котором слушает HTTP сервер. Пусто или 0.0.0.0 — слушать все интерфейсы.'), 'Адрес, на котором слушает HTTP сервер. Пусто или 0.0.0.0 — все интерфейсы.'));
+        advBody.appendChild(row('--dontkill',          chk('dontkill', '1', 'Передаёт флаг --dontkill в TorrServer.'), 'Передаёт флаг --dontkill в TorrServer. Оставляйте включённым, если знаете зачем нужен этот режим.'));
+        advBody.appendChild(row('HTTP auth',           chk('httpauth', '0', 'Включает встроенную HTTP-авторизацию TorrServer. Может мешать открытию Web UI без настроенных учётных данных.'), 'Встроенная HTTP-авторизация TorrServer. Если включить без учётных данных, Web UI может запрашивать логин.'));
+        advBody.appendChild(row('RDB режим',           chk('rdb', '0', 'Включает RDB режим TorrServer.'), 'Включает RDB режим TorrServer. Меняйте только если нужен соответствующий режим базы.'));
+        advBody.appendChild(row('Путь к логу',         inp('logpath', '/tmp/torrserver.log', 'text', undefined, undefined, 'Файл логов daemon. Пусто — лог только через stdout/stderr procd/logread.'), 'Файл логов daemon. Пусто — лог через procd/logread.'));
+        advBody.appendChild(row('Путь к web-логу',     inp('weblogpath', '/tmp/torrserver-web.log', 'text', undefined, undefined, 'Файл web-логов TorrServer.'), 'Файл web-логов TorrServer.'));
+        advBody.appendChild(row('Каталог torrents',    inp('torrentsdir', '/opt/torrserver/torrents', 'text', undefined, undefined, 'Каталог для torrent-файлов.'), 'Каталог для torrent-файлов.'));
+        advBody.appendChild(row('Torrent listen addr', inp('torrentaddr', 'example.com:6881', 'text', undefined, undefined, 'Внешний адрес/порт для torrent listener, если требуется явная публикация.'), 'Внешний адрес/порт для torrent listener, если требуется явная публикация.'));
+        advBody.appendChild(row('Публичный IPv4',      inp('pubipv4', '', 'text', undefined, undefined, 'Публичный IPv4, если TorrServer должен объявлять фиксированный адрес.'), 'Публичный IPv4, если нужно объявлять фиксированный адрес.'));
+        advBody.appendChild(row('Публичный IPv6',      inp('pubipv6', '', 'text', undefined, undefined, 'Публичный IPv6, если TorrServer должен объявлять фиксированный адрес.'), 'Публичный IPv6, если нужно объявлять фиксированный адрес.'));
+        advBody.appendChild(row('Web/API поиск',       chk('searchwa', '0', 'Включает Web/API search functionality TorrServer.'), 'Включает Web/API search functionality TorrServer.'));
+        advBody.appendChild(row('Макс. размер',        inp('maxsize', '64M', 'text', undefined, undefined, 'Лимит размера в формате, который принимает TorrServer, например 64M.'), 'Лимит размера в формате TorrServer, например 64M.'));
+        advBody.appendChild(row('Telegram',            inp('tg', '', 'text', undefined, undefined, 'Параметр Telegram-интеграции TorrServer, если используется.'), 'Параметр Telegram-интеграции TorrServer, если используется.'));
+        advBody.appendChild(row('FUSE',                inp('fuse', '', 'text', undefined, undefined, 'Параметр FUSE-монтажа TorrServer, если используется.'), 'Параметр FUSE-монтажа TorrServer, если используется.'));
+        advBody.appendChild(row('WebDAV',              chk('webdav', '0', 'Включает WebDAV режим TorrServer.'), 'Включает WebDAV режим TorrServer.'));
+        advBody.appendChild(row('Proxy URL',           inp('proxyurl', 'http://127.0.0.1:8080', 'text', undefined, undefined, 'URL внешнего proxy, если выбранный режим прокси должен использовать upstream proxy.'), 'URL внешнего proxy, если выбранный режим прокси должен использовать upstream proxy.'));
         wrap.appendChild(advTitle);
         wrap.appendChild(advBody);
 
@@ -497,7 +555,7 @@ return view.extend({
                             }).catch(function() {});
                         }, 1500);
                     }).catch(function(e) {
-                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + e.message), 'danger');
+                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + rpcErrorHint(e)), 'danger');
                     });
                 }
             }, 'Применить'),
@@ -507,7 +565,7 @@ return view.extend({
                     uci.save().then(function() {
                         ui.addNotification(null, E('p', {}, 'Настройки сохранены.'), 'info');
                     }).catch(function(e) {
-                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + e.message), 'danger');
+                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + rpcErrorHint(e)), 'danger');
                     });
                 }
             }, 'Сохранить'),
@@ -520,7 +578,7 @@ return view.extend({
                         if (r) r.replaceWith(self._renderSettings());
                         ui.addNotification(null, E('p', {}, 'Сброшено.'), 'info');
                     }).catch(function(e) {
-                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + e.message), 'danger');
+                        ui.addNotification(null, E('p', {}, 'Ошибка: ' + rpcErrorHint(e)), 'danger');
                     });
                 }
             }, 'Сбросить')
@@ -561,13 +619,15 @@ return view.extend({
             .ts-btn-stop     { background: #f44336 !important; }
             .ts-btn-restart  { background: #ff9800 !important; }
             .ts-btn-disabled { background: #666 !important; color: #ddd !important; cursor: not-allowed; }
-            .ts-webui-btn { margin-top: 8px; width: 100%; font-size: 11px; transition: opacity .2s; }
+            .ts-webui-btn { margin-top: 8px; width: 100%; font-size: 11px; transition: opacity .2s; text-align: center; text-decoration: none; box-sizing: border-box; }
             .ts-log { width: 100%; box-sizing: border-box; background: var(--background-color-low, rgba(0,0,0,.4)); color: var(--text-color-high, #f8f8f2); border-radius: 8px; padding: 10px; font-family: monospace; font-size: 11px; height: 260px; overflow-y: auto; white-space: pre-wrap; border: 1px solid var(--border-color-medium, rgba(255,255,255,.08)); margin-top: 8px; }
             .ts-settings { margin-top: 4px; }
             .ts-section-title { font-size: 13px; font-weight: 600; color: var(--text-color-high, #f5f5f5); margin: 16px 0 8px; border-bottom: 1px solid var(--border-color-medium, rgba(255,255,255,.08)); padding-bottom: 4px; }
             .ts-row   { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
             .ts-label { width: 220px; flex-shrink: 0; font-size: 13px; color: var(--text-color-high, #f5f5f5); }
+            .ts-help { display: inline-block; margin-left: 6px; width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 50%; background: rgba(127,127,127,.18); color: var(--text-color-medium, #aaa); font-size: 11px; cursor: help; }
             .ts-field { flex: 1; min-width: 260px; }
+            .ts-hint { max-width: 520px; margin-top: 3px; font-size: 11px; line-height: 1.35; color: var(--text-color-medium, #aaa); }
             .ts-field input[type=text], .ts-field input[type=number], .ts-field select { width: 100%; max-width: 420px; box-sizing: border-box; }
             .ts-chk { width: 16px; height: 16px; cursor: pointer; }
             .ts-save-row { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
