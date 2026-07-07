@@ -204,6 +204,7 @@ return view.extend({
         root.appendChild(self._renderSettings());
 
         let pendingAction     = null;
+        let pendingStartedAt  = 0;
         let fastUntil         = 0;
         let renderedCoreCount = 0;
         let lastStatus        = null;
@@ -247,16 +248,55 @@ return view.extend({
             if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
         }
 
+        function clearPendingAction() {
+            pendingAction = null;
+            pendingStartedAt = 0;
+            pidBeforeAction = null;
+            clearPendingTimeout();
+        }
+
         function setPendingTimeout() {
             clearPendingTimeout();
-            /* Сбрасываем pending через 15 сек в любом случае */
+            /* Не снимаем состояние мгновенно после setInitAction: ждём подтверждения статусом.
+             * Таймаут нужен только чтобы UI не залипал навсегда при ошибке procd/rpcd. */
             pendingTimeout = setTimeout(function() {
-                pendingAction = null;
+                const action = pendingAction;
+                clearPendingAction();
                 if (lastStatus) {
                     renderStatus(lastStatus);
                     renderCtrl(lastStatus);
                 }
-            }, 15000);
+                if (action)
+                    showError('Не дождались подтверждения состояния после ' + action + '. Проверьте статус сервиса и logread.');
+            }, 22000);
+        }
+
+        function pendingResolved(st) {
+            if (!pendingAction)
+                return false;
+
+            const svc = st && st.service || {};
+            const pid = svc.pid ? String(svc.pid) : '';
+            const oldPid = pidBeforeAction ? String(pidBeforeAction) : '';
+
+            if (pendingAction === 'stop')
+                return !svc.running || !pid;
+
+            if (pendingAction === 'start')
+                return !!(svc.running && pid);
+
+            if (pendingAction === 'restart') {
+                if (!oldPid)
+                    return !!(svc.running && pid);
+                return !!(svc.running && pid && pid !== oldPid);
+            }
+
+            return false;
+        }
+
+        function applyPendingState(st) {
+            if (pendingAction && pendingResolved(st))
+                clearPendingAction();
         }
 
         function renderBanner(st) {
@@ -329,15 +369,15 @@ return view.extend({
                     click: function(ev) {
                         ev.preventDefault();
                         pendingAction = cls;
+                        pendingStartedAt = Date.now();
                         pidBeforeAction = lastStatus && lastStatus.service ? lastStatus.service.pid : null;
-                        fastUntil = Date.now() + 15000;
+                        fastUntil = Date.now() + 22000;
                         setPendingTimeout();
                         renderStatus(st);
                         renderCtrl(st);
                         fn().then(function(reply) {
-                            clearPendingTimeout();
                             if (!reply || !reply.ok) {
-                                pendingAction = null;
+                                clearPendingAction();
                                 renderStatus(lastStatus || st);
                                 renderCtrl(lastStatus || st);
                                 const hint = reply && reply.detail
@@ -346,11 +386,14 @@ return view.extend({
                                 ui.addNotification(null, E('p', {}, 'Не удалось выполнить ' + cls + hint), 'danger');
                                 return;
                             }
-                            pendingAction = null;
+                            /* setInitAction вернул успех — кнопки остаются заблокированными,
+                             * а статус остаётся STARTING/STOPPING/RESTARTING до реального
+                             * подтверждения через luci.torrserver/status: PID появился, пропал
+                             * или сменился. */
+                            showError('');
                             tick();
                         }).catch(function(err) {
-                            clearPendingTimeout();
-                            pendingAction = null;
+                            clearPendingAction();
                             renderStatus(lastStatus || st);
                             renderCtrl(lastStatus || st);
                             showError('Ошибка: ' + rpcErrorHint(err));
@@ -392,11 +435,11 @@ return view.extend({
                 return;
             }
             if (pendingAction === 'start') {
-                statusVal.textContent = svc.running ? 'ЗАПУЩЕН' : 'STARTING...';
-                statusVal.className = 'ts-val ' + (svc.running ? 'ts-state-run' : 'ts-state-warn');
+                statusVal.textContent = 'STARTING...';
+                statusVal.className = 'ts-val ts-state-warn';
             } else if (pendingAction === 'stop') {
-                statusVal.textContent = svc.running ? 'STOPPING...' : 'ОСТАНОВЛЕН';
-                statusVal.className = 'ts-val ' + (svc.running ? 'ts-state-warn' : 'ts-state-stop');
+                statusVal.textContent = 'STOPPING...';
+                statusVal.className = 'ts-val ts-state-warn';
             } else if (pendingAction === 'restart') {
                 statusVal.textContent = 'RESTARTING...';
                 statusVal.className = 'ts-val ts-state-warn';
@@ -454,6 +497,7 @@ return view.extend({
         function tick() {
             getStatus().then(function(st) {
                 lastStatus = st;
+                applyPendingState(st);
                 showError('');
                 renderBanner(st);
                 renderStatus(st);
