@@ -1,241 +1,249 @@
-'use strict';
+#!/bin/sh
+# rpcd exec plugin for LuCI TorrServer backend.
+# Object: torrserver
+# Path on target: /usr/libexec/rpcd/torrserver
+# No rpcd-mod-ucode, no ucode-mod-fs, no rpcd-mod-file.
 
-import { readfile, popen, open, stat } from 'fs';
+BIN_PATH="/usr/bin/torrserver"
+INIT_PATH="/etc/init.d/torrserver"
+CFG_PATH="/etc/config/torrserver"
+STATE_FILE="/tmp/ts_monitor_state"
 
-function s(v) {
-    return v ? trim(v) : '';
+_trim() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//' 2>/dev/null; }
+
+json_string() {
+	awk 'BEGIN { printf "\"" }
+	{
+		gsub(/\\/, "\\\\");
+		gsub(/\"/, "\\\"");
+		gsub(/\r/, "\\r");
+		gsub(/\t/, "\\t");
+		if (NR > 1) printf "\\n";
+		printf "%s", $0;
+	}
+	END { printf "\"" }'
 }
 
-function rc(cmd) {
-    const p = popen(cmd + ' >/dev/null 2>&1; echo $?', 'r');
-    const out = p ? s(p.read('all')) : '127';
-    if (p) p.close();
-    return +out;
+is_running() {
+	[ -x "$INIT_PATH" ] && "$INIT_PATH" running >/dev/null 2>&1 && return 0
+	return 1
 }
 
-function get_pid() {
-    const p = popen('pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" 2>/dev/null | head -n 1', 'r');
-    const out = p ? s(p.read('all')) : '';
-    if (p) p.close();
-    if (!out || stat('/proc/' + out) == null) return null;
-    return out;
+get_pid() {
+	for c in /proc/[0-9]*/cmdline; do
+		[ -r "$c" ] || continue
+		cl=$(tr '\0' ' ' < "$c" 2>/dev/null) || continue
+		case "$cl" in
+			*"/etc/init.d/torrserver"*) continue ;;
+			*"rc.common"*) continue ;;
+			"$BIN_PATH"|"$BIN_PATH "*)
+				p=${c#/proc/}; p=${p%/cmdline}; printf '%s\n' "$p"; return 0 ;;
+		esac
+	done
+	pgrep -f "^${BIN_PATH}([[:space:]]|$)" 2>/dev/null | head -n 1
 }
 
-function service_running() {
-    return rc('/etc/init.d/torrserver running') == 0;
+proc_exists() { [ -n "$1" ] && [ -d "/proc/$1" ]; }
+
+kill_lingering() {
+	pids=$(pgrep -f "^${BIN_PATH}([[:space:]]|$)" 2>/dev/null | tr '\n' ' ')
+	[ -n "$pids" ] || return 0
+	kill -TERM $pids 2>/dev/null || true
+	i=0
+	while [ "$i" -lt 10 ]; do
+		pgrep -f "^${BIN_PATH}([[:space:]]|$)" >/dev/null 2>&1 || return 0
+		sleep 0.3 2>/dev/null || true
+		i=$((i + 1))
+	done
+	pids=$(pgrep -f "^${BIN_PATH}([[:space:]]|$)" 2>/dev/null | tr '\n' ' ')
+	[ -n "$pids" ] && kill -KILL $pids 2>/dev/null || true
+	sleep 0.3 2>/dev/null || true
+	pgrep -f "^${BIN_PATH}([[:space:]]|$)" >/dev/null 2>&1 && return 1
+	return 0
 }
 
-function read_cpu_snapshot() {
-    const txt = readfile('/proc/stat') || '';
-    const cur = {};
-    for (let line in split(txt, '\n')) {
-        const m = match(line, /^(cpu\d*)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-        if (!m) continue;
-        const u = +m[2], n = +m[3], sv = +m[4], i = +m[5];
-        cur[m[1]] = { total: u+n+sv+i, work: u+n+sv };
-    }
-    return cur;
+wait_state() {
+	want="$1"
+	max_ms="${2:-3000}"
+	steps=$((max_ms / 300))
+	[ "$steps" -lt 1 ] && steps=1
+	i=0
+	while [ "$i" -lt "$steps" ]; do
+		if is_running; then cur=1; else cur=0; fi
+		[ "$cur" = "$want" ] && return 0
+		sleep 0.3 2>/dev/null || true
+		i=$((i + 1))
+	done
+	if is_running; then cur=1; else cur=0; fi
+	[ "$cur" = "$want" ]
 }
 
-function kill_lingering() {
-    const t = popen(
-        'pids=$(pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" 2>/dev/null); ' +
-        '[ -n "$pids" ] && kill -TERM $pids 2>/dev/null; echo "$pids"', 'r');
-    const pids = t ? s(t.read('all')) : '';
-    if (t) t.close();
-    if (!length(pids)) return true;
+cpu_count() { grep -c '^cpu[0-9]' /proc/stat 2>/dev/null || echo 0; }
 
-    let gone = false;
-    for (let i = 0; i < 10; i++) {
-        const chk = popen('pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" >/dev/null 2>&1; echo $?', 'r');
-        const still = chk ? s(chk.read('all')) : '1';
-        if (chk) chk.close();
-        if (still === '1') { gone = true; break; }
-        const sl = popen('sleep 0.3 2>/dev/null || true', 'r');
-        if (sl) sl.close();
-    }
-    if (gone) return true;
-
-    const k = popen(
-        'pids=$(pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" 2>/dev/null); ' +
-        '[ -n "$pids" ] && kill -KILL $pids 2>/dev/null; true', 'r');
-    if (k) k.close();
-    const sl2 = popen('sleep 0.3 2>/dev/null || true', 'r');
-    if (sl2) sl2.close();
-
-    const fin = popen('pgrep -f "^/usr/bin/torrserver([[:space:]]|$)" >/dev/null 2>&1; echo $?', 'r');
-    const rc2 = fin ? s(fin.read('all')) : '0';
-    if (fin) fin.close();
-    return rc2 === '1';
+emit_cores() {
+	first=1
+	awk '/^cpu[0-9]+[[:space:]]/ { print $1, $2 + $3 + $4 + $5, $2 + $3 + $4 }' /proc/stat 2>/dev/null |
+	while read -r name total work; do
+		pct="0.0"
+		if [ -r "$STATE_FILE" ]; then
+			prev=$(grep "^${name} " "$STATE_FILE" 2>/dev/null)
+			pt=$(printf '%s\n' "$prev" | awk '{print $2}')
+			pw=$(printf '%s\n' "$prev" | awk '{print $3}')
+			if [ -n "$pt" ] && [ -n "$pw" ]; then
+				dt=$((total - pt))
+				dw=$((work - pw))
+				if [ "$dt" -gt 0 ] 2>/dev/null; then
+					pct=$(awk -v dw="$dw" -v dt="$dt" 'BEGIN { printf "%.1f", (dw / dt) * 100 }')
+				fi
+			fi
+		fi
+		[ "$first" = 1 ] || printf ','
+		printf '%s' "$pct"
+		first=0
+	done
 }
 
-/* Подождать до max_ms мс пока сервис не перейдёт в ожидаемое состояние.
- * want_running: true = ждём запуска, false = ждём остановки */
-function wait_state(want_running, max_ms) {
-    const steps = max_ms / 300;
-    for (let i = 0; i < steps; i++) {
-        if (service_running() === want_running) return true;
-        const sl = popen('sleep 0.3 2>/dev/null || true', 'r');
-        if (sl) sl.close();
-    }
-    return service_running() === want_running;
+write_state() {
+	pid="$1"
+	proc_ticks="$2"
+	{
+		awk '/^cpu[0-9]*[[:space:]]/ { print $1, $2 + $3 + $4 + $5, $2 + $3 + $4 }' /proc/stat 2>/dev/null
+		printf 'pid %s %s\n' "${pid:-0}" "${proc_ticks:-0}"
+	} > "$STATE_FILE.$$" 2>/dev/null && mv "$STATE_FILE.$$" "$STATE_FILE" 2>/dev/null || rm -f "$STATE_FILE.$$" 2>/dev/null
 }
 
-return {
-    status: {
-        call: function() {
-            const has_bin  = stat('/usr/bin/torrserver')    != null;
-            const has_init = stat('/etc/init.d/torrserver') != null;
-            const has_cfg  = stat('/etc/config/torrserver') != null;
-            const running  = has_init ? service_running() : false;
-            const pid      = running ? get_pid() : null;
+method_status() {
+	has_bin=false;  [ -x "$BIN_PATH" ]  && has_bin=true
+	has_init=false; [ -x "$INIT_PATH" ] && has_init=true
+	has_cfg=false;  [ -f "$CFG_PATH" ]  && has_cfg=true
 
-            const data = {
-                running:        running,
-                pid:            pid,
-                bin_present:    has_bin,
-                init_present:   has_init,
-                config_present: has_cfg,
-                mem_kb:         0,
-                ts_cpu:         '0.0',
-                sys_mem:        { total: 0, free: 0, available: 0 },
-                cores:          []
-            };
+	if is_running; then running=true; else running=false; fi
+	pid=""
+	[ "$running" = true ] && pid=$(get_pid)
+	proc_ticks=0
+	mem_kb=0
+	if proc_exists "$pid"; then
+		mem_kb=$(awk '/^VmRSS:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null)
+		[ -n "$mem_kb" ] || mem_kb=0
+		proc_ticks=$(awk '{ print $14 + $15 }' "/proc/$pid/stat" 2>/dev/null)
+		[ -n "$proc_ticks" ] || proc_ticks=0
+	else
+		pid=""
+	fi
 
-            const meminfo = readfile('/proc/meminfo') || '';
-            for (let line in split(meminfo, '\n')) {
-                const m = match(line, /^(\w+):\s+(\d+)/);
-                if (!m) continue;
-                if      (m[1] == 'MemTotal')     data.sys_mem.total     = +m[2];
-                else if (m[1] == 'MemFree')      data.sys_mem.free      = +m[2];
-                else if (m[1] == 'MemAvailable') data.sys_mem.available = +m[2];
-            }
-            if (!data.sys_mem.available)
-                data.sys_mem.available = data.sys_mem.free;
+	mem_total=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null); [ -n "$mem_total" ] || mem_total=0
+	mem_free=$(awk '/^MemFree:/ { print $2; exit }' /proc/meminfo 2>/dev/null); [ -n "$mem_free" ] || mem_free=0
+	mem_avail=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null); [ -n "$mem_avail" ] || mem_avail="$mem_free"
 
-            let cur_proc_total = 0;
-            if (pid) {
-                const st = readfile('/proc/' + pid + '/status') || '';
-                const rm = match(st, /VmRSS:\s+(\d+)/);
-                if (rm) data.mem_kb = +rm[1];
-                const pstat = readfile('/proc/' + pid + '/stat') || '';
-                const parts = split(pstat, ' ');
-                cur_proc_total = (+parts[13] || 0) + (+parts[14] || 0);
-            }
+	ts_cpu="0.0"
+	if [ -n "$pid" ] && [ -r "$STATE_FILE" ]; then
+		cur_cpu=$(awk '/^cpu / { print $2 + $3 + $4 + $5; exit }' /proc/stat 2>/dev/null)
+		prev_cpu=$(awk '/^cpu / { print $2; exit }' "$STATE_FILE" 2>/dev/null)
+		prev_pid=$(awk '/^pid / { print $2; exit }' "$STATE_FILE" 2>/dev/null)
+		prev_proc=$(awk '/^pid / { print $3; exit }' "$STATE_FILE" 2>/dev/null)
+		if [ "$prev_pid" = "$pid" ] && [ -n "$cur_cpu" ] && [ -n "$prev_cpu" ] && [ -n "$prev_proc" ]; then
+			d_sys=$((cur_cpu - prev_cpu))
+			d_proc=$((proc_ticks - prev_proc))
+			ncpu=$(cpu_count); [ -n "$ncpu" ] && [ "$ncpu" -gt 0 ] 2>/dev/null || ncpu=1
+			if [ "$d_sys" -gt 0 ] 2>/dev/null; then
+				ts_cpu=$(awk -v dp="$d_proc" -v ds="$d_sys" -v n="$ncpu" 'BEGIN { printf "%.1f", (dp / ds) * 100 * n }')
+			fi
+		fi
+	fi
 
-            const cur_sys = read_cpu_snapshot();
-            let prev = {};
-            const sf = open('/tmp/ts_monitor_state.json', 'r');
-            if (sf) {
-                try { prev = json(sf.read('all')) || {}; } catch(e) {}
-                sf.close();
-            }
+	cores=$(emit_cores)
+	write_state "$pid" "$proc_ticks"
 
-            for (let i = 0; ; i++) {
-                const k = 'cpu' + i;
-                if (!cur_sys[k]) break;
-                let pct = 0;
-                if (prev[k]) {
-                    const dt = cur_sys[k].total - (prev[k].total || 0);
-                    const dw = cur_sys[k].work  - (prev[k].work  || 0);
-                    if (dt > 0) pct = +sprintf('%.1f', (dw / dt) * 100);
-                }
-                push(data.cores, pct);
-            }
+	if [ -n "$pid" ]; then pid_json="$pid"; else pid_json=null; fi
+	printf '{"running":%s,"pid":%s,"bin_present":%s,"init_present":%s,"config_present":%s,"mem_kb":%s,"ts_cpu":"%s","sys_mem":{"total":%s,"free":%s,"available":%s},"cores":[%s]}\n' \
+		"$running" "$pid_json" "$has_bin" "$has_init" "$has_cfg" "${mem_kb:-0}" "$ts_cpu" \
+		"$mem_total" "$mem_free" "$mem_avail" "$cores"
+}
 
-            if (pid && cur_sys['cpu'] && prev['cpu'] &&
-                prev['pid'] === pid && prev['proc'] != null) {
-                const d_sys  = cur_sys['cpu'].total - (prev['cpu'].total || 0);
-                const d_proc = cur_proc_total - (prev['proc'] || 0);
-                let ncpu = length(data.cores) || 1;
-                if (d_sys > 0)
-                    data.ts_cpu = sprintf('%.1f', (d_proc / d_sys) * 100 * ncpu);
-            }
+method_log() {
+	if command -v logread >/dev/null 2>&1; then
+		out=$(logread -e torrserver 2>/dev/null | tail -n 200)
+	else
+		out=""
+	fi
+	[ -n "$out" ] || out="Нет событий torrserver в логе."
+	printf '{"log":%s}\n' "$(printf '%s' "$out" | json_string)"
+}
 
-            const ns = cur_sys;
-            ns['proc'] = pid ? cur_proc_total : null;
-            ns['pid']  = pid;
-            const wf = open('/tmp/ts_monitor_state.json', 'w');
-            if (wf) { wf.write(json(ns)); wf.close(); }
+method_start() {
+	[ -x "$INIT_PATH" ] || { printf '{"ok":false,"pid":null,"detail":"init_missing"}\n'; return; }
+	"$INIT_PATH" start >/dev/null 2>&1
+	init_rc=$?
+	if [ "$init_rc" -eq 0 ] && wait_state 1 3000; then
+		pid=$(get_pid)
+		[ -n "$pid" ] || pid=null
+		printf '{"ok":true,"pid":%s,"detail":"started"}\n' "$pid"
+	else
+		printf '{"ok":false,"pid":null,"detail":"%s","init_rc":%s}\n' "$([ "$init_rc" -eq 0 ] && printf start_no_process || printf init_failed)" "$init_rc"
+	fi
+}
 
-            return data;
-        }
-    },
+method_stop() {
+	[ -x "$INIT_PATH" ] || { printf '{"ok":false,"detail":"init_missing","init_rc":127}\n'; return; }
+	"$INIT_PATH" stop >/dev/null 2>&1
+	init_rc=$?
+	if wait_state 0 3000; then
+		printf '{"ok":true,"detail":"stopped_clean","init_rc":%s}\n' "$init_rc"
+	elif kill_lingering; then
+		printf '{"ok":true,"detail":"stopped_killed","init_rc":%s}\n' "$init_rc"
+	else
+		printf '{"ok":false,"detail":"lingering_processes","init_rc":%s}\n' "$init_rc"
+	fi
+}
 
-    log: {
-        call: function() {
-            const p = popen('logread -e torrserver 2>/dev/null | tail -n 200', 'r');
-            const out = p ? (p.read('all') || '') : '';
-            if (p) p.close();
-            return { log: length(s(out)) ? out : 'Нет событий torrserver в логе.' };
-        }
-    },
+method_restart() {
+	[ -x "$INIT_PATH" ] || { printf '{"ok":false,"pid":null,"detail":"init_missing"}\n'; return; }
+	"$INIT_PATH" stop >/dev/null 2>&1 || true
+	wait_state 0 3000 || kill_lingering || true
+	sleep 0.5 2>/dev/null || true
+	"$INIT_PATH" start >/dev/null 2>&1
+	init_rc=$?
+	if [ "$init_rc" -eq 0 ] && wait_state 1 3000; then
+		pid=$(get_pid)
+		[ -n "$pid" ] || pid=null
+		printf '{"ok":true,"pid":%s,"detail":"restarted"}\n' "$pid"
+	else
+		printf '{"ok":false,"pid":null,"detail":"%s","init_rc":%s}\n' "$([ "$init_rc" -eq 0 ] && printf start_no_process || printf start_failed)" "$init_rc"
+	fi
+}
 
-    start: {
-        call: function() {
-            const init_ok = rc('/etc/init.d/torrserver start') == 0;
-            /* Верифицируем что процесс реально поднялся */
-            const running = init_ok ? wait_state(true, 3000) : false;
-            const pid     = running ? get_pid() : null;
-            return {
-                ok:     running,
-                pid:    pid,
-                detail: running ? 'started' : (init_ok ? 'start_no_process' : 'init_failed')
-            };
-        }
-    },
+method_enable() {
+	[ -x "$INIT_PATH" ] || { printf '{"ok":false,"detail":"init_missing"}\n'; return; }
+	"$INIT_PATH" enable >/dev/null 2>&1
+	rc=$?
+	printf '{"ok":%s,"init_rc":%s}\n' "$([ "$rc" -eq 0 ] && printf true || printf false)" "$rc"
+}
 
-    stop: {
-        call: function() {
-            const init_rc = rc('/etc/init.d/torrserver stop');
-            /* Ждём чистой остановки через procd */
-            const stopped_clean = wait_state(false, 3000);
-            /* Если ещё живёт — добиваем */
-            const ok = stopped_clean ? true : kill_lingering();
-            return {
-                ok:     ok,
-                detail: stopped_clean  ? 'stopped_clean'
-                      : ok             ? 'stopped_killed'
-                      :                  'lingering_processes',
-                init_rc: init_rc
-            };
-        }
-    },
+method_disable() {
+	[ -x "$INIT_PATH" ] || { printf '{"ok":false,"detail":"init_missing"}\n'; return; }
+	"$INIT_PATH" disable >/dev/null 2>&1
+	rc=$?
+	printf '{"ok":%s,"init_rc":%s}\n' "$([ "$rc" -eq 0 ] && printf true || printf false)" "$rc"
+}
 
-    restart: {
-        call: function() {
-            /* Остановка с зачисткой */
-            rc('/etc/init.d/torrserver stop');
-            if (!wait_state(false, 3000))
-                kill_lingering();
-
-            /* Пауза чтобы procd сбросил respawn счётчик */
-            const sl = popen('sleep 0.5 2>/dev/null || true', 'r');
-            if (sl) sl.close();
-
-            /* Запуск с верификацией */
-            const init_ok = rc('/etc/init.d/torrserver start') == 0;
-            const running = init_ok ? wait_state(true, 3000) : false;
-            const pid     = running ? get_pid() : null;
-            return {
-                ok:     running,
-                pid:    pid,
-                detail: running ? 'restarted' : (init_ok ? 'start_no_process' : 'start_failed')
-            };
-        }
-    },
-
-    enable: {
-        call: function() {
-            const ok = rc('/etc/init.d/torrserver enable') == 0;
-            return { ok: ok };
-        }
-    },
-
-    disable: {
-        call: function() {
-            const ok = rc('/etc/init.d/torrserver disable') == 0;
-            return { ok: ok };
-        }
-    }
-};
+case "$1" in
+	list)
+		printf '{"status":{},"log":{},"start":{},"stop":{},"restart":{},"enable":{},"disable":{}}\n'
+		;;
+	call)
+		case "$2" in
+			status) method_status ;;
+			log) method_log ;;
+			start) method_start ;;
+			stop) method_stop ;;
+			restart) method_restart ;;
+			enable) method_enable ;;
+			disable) method_disable ;;
+			*) printf '{"error":"unknown method"}\n'; exit 1 ;;
+		esac
+		;;
+	*)
+		printf '{"error":"unknown command"}\n'
+		exit 1
+		;;
+esac

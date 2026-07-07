@@ -25,12 +25,12 @@
 
 ## Архитектура LuCI пакета (КРИТИЧНО)
 
-### Правильная схема — rpcd ucode
+### Правильная схема — лёгкий rpcd exec backend
 
-Backend работает через **rpcd**, не через LuCI dispatcher controller.
+Backend работает через штатный **rpcd executable plugin**, не через LuCI dispatcher controller и не через rpcd ucode plugin.
 
 ```
-/usr/share/rpcd/ucode/torrserver        ← rpcd backend, chmod 0755, БЕЗ расширения
+/usr/libexec/rpcd/torrserver               ← shell rpcd backend, chmod 0755, БЕЗ расширения
 /usr/share/rpcd/acl.d/luci-app-torrserver.json
 /usr/share/luci/menu.d/luci-app-torrserver.json
 /www/luci-static/resources/view/torrserver/overview.js
@@ -38,36 +38,50 @@ Backend работает через **rpcd**, не через LuCI dispatcher co
 
 **Имя файла = имя ubus объекта.** Файл называется `torrserver` → объект `torrserver` → JS вызывает `object: 'torrserver'`.
 
+Зависимости LuCI-пакета должны оставаться лёгкими:
+
+```yaml
+depends:
+  - luci-base
+  - rpcd
+```
+
+Не добавлять `rpcd-mod-ucode`, `ucode-mod-fs`, `rpcd-mod-file`, если backend остаётся shell exec plugin.
+
 ### Почему НЕ LuCI controller
 
-`/usr/share/ucode/luci/controller/` — этот путь не используется. Попытки городить `/api/status` маршруты через LuCI dispatcher приводят к HTTP 500 из-за несовместимости форматов модулей.
+`/usr/share/ucode/luci/controller/` для backend API не используется. Попытки городить `/api/status` маршруты через LuCI dispatcher приводят к лишней сложности и HTTP 500/ACL-регрессиям.
 
-### Формат rpcd ucode backend
+### Формат rpcd exec backend
 
-```javascript
-// ПРАВИЛЬНО
-return {
-    status: {
-        call: function() { return { running: true, ... }; }
-    },
-    start: {
-        call: function() { return { ok: true }; }
-    }
-};
+Файл `/usr/libexec/rpcd/torrserver` — исполняемый POSIX shell script. `rpcd` вызывает его двумя способами:
 
-// НЕПРАВИЛЬНО — export не работает при загрузке через require()
-export function action_status() { ... }
+```sh
+/usr/libexec/rpcd/torrserver list
+/usr/libexec/rpcd/torrserver call status
 ```
 
-### Формат ucode — важные ограничения
+Минимальный контракт:
 
-```javascript
-// ПРАВИЛЬНО
-for (let line in split(txt, '\n')) { ... }
-
-// НЕПРАВИЛЬНО — const в for-in не поддерживается в ucode OpenWrt 24.10
-for (const line in split(txt, '\n')) { ... }
+```sh
+case "$1" in
+  list)
+    printf '{"status":{},"start":{},"stop":{},"restart":{},"enable":{},"disable":{}}\n'
+    ;;
+  call)
+    case "$2" in
+      status) method_status ;;
+      start) method_start ;;
+      stop) method_stop ;;
+      restart) method_restart ;;
+      enable) method_enable ;;
+      disable) method_disable ;;
+    esac
+    ;;
+esac
 ```
+
+Методы обязаны печатать валидный JSON в stdout. Не использовать bash-only синтаксис внутри backend: только `/bin/sh`/BusyBox-совместимый код.
 
 ### JS frontend — rpc.declare()
 
@@ -75,7 +89,7 @@ for (const line in split(txt, '\n')) { ... }
 'require rpc';
 
 const callStatus = rpc.declare({
-    object: 'torrserver',    // = имя rpcd файла
+    object: 'torrserver',
     method: 'status',
     expect: { '': {} }
 });
@@ -125,7 +139,7 @@ luci/
   menu.d/luci-app-torrserver.json
   acl.d/luci-app-torrserver.json
   view/torrserver/overview.js
-  rpcd/torrserver                  ← rpcd ucode backend (без расширения)
+  rpcd/torrserver                  ← shell rpcd exec backend (без расширения)
 
 .github/workflows/
   Build LuCI App TorrServer Companion.yml   ← собирает luci-app-torrserver
@@ -140,17 +154,17 @@ luci/
 
 ```yaml
 # Prepare package root
-cp luci/rpcd/torrserver root/usr/share/rpcd/ucode/torrserver
-chmod 0755 root/usr/share/rpcd/ucode/torrserver
+cp luci/rpcd/torrserver root/usr/libexec/rpcd/torrserver
+chmod 0755 root/usr/libexec/rpcd/torrserver
 
 # nfpm contents
-- src: ./root/usr/share/rpcd/ucode/torrserver
-  dst: /usr/share/rpcd/ucode/torrserver
+- src: ./root/usr/libexec/rpcd/torrserver
+  dst: /usr/libexec/rpcd/torrserver
   file_info:
     mode: 0755
 ```
 
-`ucode` в `depends` — **не нужен** для rpcd схемы.
+`rpcd-mod-ucode`, `ucode-mod-fs`, `rpcd-mod-file` в `depends` — **не нужны** для shell rpcd exec backend.
 
 ---
 
@@ -205,7 +219,7 @@ ubus call torrserver status    # должен вернуть JSON
 /etc/init.d/uhttpd restart
 ```
 
-Если `ubus -v list torrserver` пустой — rpcd не подхватил файл. Проверить права (`chmod 0755`) и имя файла (без расширения).
+Если `ubus -v list torrserver` пустой — rpcd не подхватил файл. Проверить путь `/usr/libexec/rpcd/torrserver`, права (`chmod 0755`), shebang `#!/bin/sh` и имя файла без расширения.
 
 ---
 
@@ -213,11 +227,11 @@ ubus call torrserver status    # должен вернуть JSON
 
 | Ошибка | Правильно |
 |--------|-----------|
-| `export function` в rpcd backend | `return { method: { call: fn } }` |
-| `for (const x in ...)` в ucode | `for (let x in ...)` |
+| ucode backend ради простых shell-проверок | `/usr/libexec/rpcd/torrserver` exec plugin |
+| bashisms в rpcd backend | POSIX `/bin/sh` / BusyBox-compatible код |
 | `document.getElementById` в render() | замыкания на переменные элементов |
 | путь `/usr/share/luci/view/` | `/www/luci-static/resources/view/` |
 | `window.fetch('/api/...')` | `rpc.declare()` |
-| LuCI controller для API | rpcd ucode backend |
+| LuCI controller для API | shell rpcd exec backend |
 | `"type": "call"` в menu.d | не нужен, только `"type": "view"` |
 | `handler:` в menu.d | не существует, поле называется `module:` |

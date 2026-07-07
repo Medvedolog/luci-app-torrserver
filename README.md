@@ -43,6 +43,14 @@
 - просмотр системного лога TorrServer
 - редактирование основных и дополнительных UCI-настроек
 
+Backend LuCI-пакета сделан как лёгкий штатный `rpcd` executable plugin:
+
+- `/usr/libexec/rpcd/torrserver`
+- `/usr/share/rpcd/acl.d/luci-app-torrserver.json`
+- `/www/luci-static/resources/view/torrserver/overview.js`
+
+Для этого не нужны `rpcd-mod-ucode`, `ucode-mod-fs` или `rpcd-mod-file`; зависимости LuCI-пакета ограничены `luci-base` и `rpcd`.
+
 ---
 
 ## Откуда берётся исходный код
