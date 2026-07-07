@@ -1,8 +1,9 @@
 {
   "luci-app-torrserver": {
-    "description": "Grant access to TorrServer RPC and UCI",
+    "description": "Grant access to TorrServer UCI, service control and optional RPC backend",
     "read": {
       "ubus": {
+        "luci": [ "getInitList", "getProcessList" ],
         "torrserver": [ "status", "log" ],
         "network.interface.lan": [ "status" ],
         "uci": [ "get", "changes" ]
@@ -11,6 +12,7 @@
     },
     "write": {
       "ubus": {
+        "luci": [ "setInitAction" ],
         "torrserver": [ "start", "stop", "restart", "enable", "disable" ]
       },
       "uci": [ "torrserver" ]

@@ -22,11 +22,45 @@ const callLog = rpc.declare({
     expect: { '': { log: '' } }
 });
 
-const callStart   = rpc.declare({ object: 'torrserver', method: 'start',   expect: { '': { ok: false } } });
-const callStop    = rpc.declare({ object: 'torrserver', method: 'stop',    expect: { '': { ok: false } } });
-const callRestart = rpc.declare({ object: 'torrserver', method: 'restart', expect: { '': { ok: false } } });
-const callEnable  = rpc.declare({ object: 'torrserver', method: 'enable',  expect: { '': { ok: false } } });
-const callDisable = rpc.declare({ object: 'torrserver', method: 'disable', expect: { '': { ok: false } } });
+const callStartCustom   = rpc.declare({ object: 'torrserver', method: 'start',   expect: { '': { ok: false } } });
+const callStopCustom    = rpc.declare({ object: 'torrserver', method: 'stop',    expect: { '': { ok: false } } });
+const callRestartCustom = rpc.declare({ object: 'torrserver', method: 'restart', expect: { '': { ok: false } } });
+const callEnableCustom  = rpc.declare({ object: 'torrserver', method: 'enable',  expect: { '': { ok: false } } });
+const callDisableCustom = rpc.declare({ object: 'torrserver', method: 'disable', expect: { '': { ok: false } } });
+
+
+const callInitList = rpc.declare({
+    object: 'luci',
+    method: 'getInitList',
+    params: [ 'name' ],
+    expect: { '': {} }
+});
+
+const callInitActionRaw = rpc.declare({
+    object: 'luci',
+    method: 'setInitAction',
+    params: [ 'name', 'action' ],
+    expect: { '': { result: false } }
+});
+
+const callProcessList = rpc.declare({
+    object: 'luci',
+    method: 'getProcessList',
+    expect: { result: [] }
+});
+
+function callInitAction(action) {
+    return callInitActionRaw('torrserver', action).then(function(res) {
+        const ok = !!(res && (res.result === true || res.result === 1));
+        return { ok: ok, detail: ok ? action : ((res && res.error) || 'init_action_failed') };
+    });
+}
+
+const callStart   = function() { return callInitAction('start'); };
+const callStop    = function() { return callInitAction('stop'); };
+const callRestart = function() { return callInitAction('restart'); };
+const callEnable  = function() { return callInitAction('enable'); };
+const callDisable = function() { return callInitAction('disable'); };
 
 const callNetworkStatus = rpc.declare({
     object: 'network.interface.lan',
@@ -73,8 +107,72 @@ function rpcErrorHint(err) {
     if (/access denied|permission denied|403/i.test(msg))
         return msg + ' — проверьте ACL luci-app-torrserver и перезапустите rpcd.';
     if (/object not found|not found/i.test(msg))
-        return msg + ' — проверьте /usr/libexec/rpcd/torrserver и restart rpcd.';
+        return msg + ' — custom backend не зарегистрирован; service actions выполняются через штатный объект luci.';
     return msg;
+}
+
+
+function firstValue(obj, keys) {
+    for (let i = 0; i < keys.length; i++) {
+        if (obj && obj[keys[i]] != null)
+            return obj[keys[i]];
+    }
+    return null;
+}
+
+function processCommand(p) {
+    const cmd = firstValue(p, [ 'command', 'COMMAND', 'cmd', 'cmdline', 'args', 'name' ]);
+    if (Array.isArray(cmd))
+        return cmd.join(' ');
+    return String(cmd || '');
+}
+
+function findTorrServerProcess(list) {
+    if (!Array.isArray(list))
+        list = list && typeof(list) === 'object' ? Object.keys(list).map(function(k) { return list[k]; }) : [];
+
+    for (let i = 0; i < list.length; i++) {
+        const p = list[i] || {};
+        const cmd = processCommand(p);
+        if (cmd.indexOf('/usr/bin/torrserver') >= 0 || /(^|\s)torrserver(\s|$)/.test(cmd))
+            return p;
+    }
+    return null;
+}
+
+function fallbackStatus() {
+    return Promise.all([
+        callInitList('torrserver').catch(function() { return {}; }),
+        callProcessList().catch(function() { return []; })
+    ]).then(function(data) {
+        const init = data[0] || {};
+        const plist = data[1] || [];
+        const initObj = init.torrserver || (init.result && init.result.torrserver) || null;
+        const proc = findTorrServerProcess(plist);
+        const pid = proc ? +(firstValue(proc, [ 'pid', 'PID' ]) || 0) : null;
+        const rss = proc ? +(firstValue(proc, [ 'rss', 'RSS', 'res', 'RES', 'mem_kb' ]) || 0) : 0;
+        const cpu = proc ? +(firstValue(proc, [ 'cpu_percent', 'cpu', '%CPU', 'pcpu' ]) || 0) : 0;
+
+        return {
+            running: !!proc,
+            pid: pid || null,
+            bin_present: true,
+            init_present: initObj ? true : false,
+            config_present: uci.get('torrserver', 'main') != null || true,
+            mem_kb: rss,
+            ts_cpu: isNaN(cpu) ? '0.0' : cpu.toFixed(1),
+            sys_mem: { total: 0, free: 0, available: 0 },
+            cores: [],
+            fallback_status: true,
+            rpc_missing: true
+        };
+    });
+}
+
+function getStatus() {
+    return callStatus().catch(function() {
+        return fallbackStatus();
+    });
 }
 
 return view.extend({
@@ -84,7 +182,7 @@ return view.extend({
         return Promise.all([
             uci.load('torrserver').catch(function() { return null; }),
             getLanIp(),
-            callStatus().catch(function() { return {
+            getStatus().catch(function() { return {
                 running: false, pid: null,
                 bin_present: null, init_present: null, config_present: null,
                 mem_kb: 0, ts_cpu: '0.0',
@@ -242,7 +340,7 @@ return view.extend({
                 banner.appendChild(E('div', { class: 'ts-error' }, [
                     E('strong', {}, 'RPC статус недоступен.'),
                     E('br'), E('br'),
-                    E('span', {}, 'Нет ответа от ubus object torrserver. Проверьте статус rpcd.')
+                    E('span', {}, 'Custom ubus object torrserver не зарегистрирован. Управление будет выполняться через штатный luci.setInitAction; для полного статуса проверьте /usr/libexec/rpcd/torrserver.')
                 ]));
                 return;
             }
@@ -264,18 +362,21 @@ return view.extend({
         function renderCtrl(st) {
             while (ctrlPanel.firstChild) ctrlPanel.removeChild(ctrlPanel.firstChild);
 
-            /* Web UI ссылка — только если сервис запущен */
+            /* Web UI не блокируем из-за сбоя custom RPC: порт может быть доступен,
+             * даже если статус получен fallback-методом или не получен вообще. */
             openBtn.href = currentWebUrl();
-            if (st.running) {
+            const canOpenWeb = st.bin_present !== false && st.init_present !== false;
+            if (canOpenWeb) {
                 openBtn.classList.remove('disabled');
                 openBtn.style.opacity = '1';
                 openBtn.style.pointerEvents = '';
-                openBtn.title = 'Открыть ' + currentWebUrl();
+                openBtn.title = st.running ? ('Открыть ' + currentWebUrl())
+                    : ('Открыть ' + currentWebUrl() + ' — сервис может быть остановлен');
             } else {
                 openBtn.classList.add('disabled');
                 openBtn.style.opacity = '0.4';
                 openBtn.style.pointerEvents = 'none';
-                openBtn.title = 'Web UI доступен только когда TorrServer запущен';
+                openBtn.title = 'Web UI недоступен: daemon или init script отсутствует';
             }
 
             const canCtrl = !!(st.bin_present && st.init_present);
@@ -394,12 +495,12 @@ return view.extend({
                 logBox.textContent = (res && res.log) ? res.log : 'Лог пуст.';
                 logBox.scrollTop = logBox.scrollHeight;
             }).catch(function(err) {
-                logBox.textContent = 'Ошибка: ' + err.message;
+                logBox.textContent = 'Лог недоступен: custom ubus object torrserver не зарегистрирован. Для логов используйте logread -e torrserver.';
             });
         }
 
         function tick() {
-            callStatus().then(function(st) {
+            getStatus().then(function(st) {
                 lastStatus = st;
                 showError('');
                 renderBanner(st);
@@ -434,15 +535,13 @@ return view.extend({
         const wrap = E('div', { class: 'ts-settings' });
 
         function row(label, el, help) {
-            const labelNode = E('label', { class: 'ts-label', title: help || '' }, [
+            const labelNode = E('label', { class: 'ts-label' }, [
                 label,
-                help ? E('span', { class: 'ts-help', title: help }, '?') : ''
+                help ? E('span', { class: 'ts-help', title: help, 'data-tip': help, role: 'img', 'aria-label': help }, '?') : ''
             ]);
-            const fieldNodes = [ el ];
-            if (help) fieldNodes.push(E('div', { class: 'ts-hint' }, help));
             return E('div', { class: 'ts-row' }, [
                 labelNode,
-                E('div', { class: 'ts-field' }, fieldNodes)
+                E('div', { class: 'ts-field' }, [ el ])
             ]);
         }
 
@@ -546,7 +645,7 @@ return view.extend({
                         ui.addNotification(null, E('p', {}, 'Настройки применены.'), 'info');
                         /* После apply — обновляем статус чтобы убедиться что сервис поднялся */
                         setTimeout(function() {
-                            callStatus().then(function(st) {
+                            getStatus().then(function(st) {
                                 if (st && !st.running && st.bin_present && st.init_present) {
                                     ui.addNotification(null,
                                         E('p', {}, 'Внимание: сервис не запущен после применения настроек.'),
@@ -625,9 +724,9 @@ return view.extend({
             .ts-section-title { font-size: 13px; font-weight: 600; color: var(--text-color-high, #f5f5f5); margin: 16px 0 8px; border-bottom: 1px solid var(--border-color-medium, rgba(255,255,255,.08)); padding-bottom: 4px; }
             .ts-row   { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
             .ts-label { width: 220px; flex-shrink: 0; font-size: 13px; color: var(--text-color-high, #f5f5f5); }
-            .ts-help { display: inline-block; margin-left: 6px; width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 50%; background: rgba(127,127,127,.18); color: var(--text-color-medium, #aaa); font-size: 11px; cursor: help; }
+            .ts-help { position: relative; display: inline-block; margin-left: 6px; width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 50%; background: rgba(127,127,127,.18); color: var(--text-color-medium, #aaa); font-size: 11px; cursor: help; }
+            .ts-help:hover::after { content: attr(data-tip); position: absolute; z-index: 9999; left: 20px; top: -8px; width: max-content; max-width: 360px; padding: 8px 10px; border-radius: 6px; background: rgba(20,24,32,.96); border: 1px solid var(--border-color-medium, rgba(255,255,255,.18)); color: var(--text-color-high, #f5f5f5); font-size: 12px; line-height: 1.35; text-align: left; white-space: normal; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
             .ts-field { flex: 1; min-width: 260px; }
-            .ts-hint { max-width: 520px; margin-top: 3px; font-size: 11px; line-height: 1.35; color: var(--text-color-medium, #aaa); }
             .ts-field input[type=text], .ts-field input[type=number], .ts-field select { width: 100%; max-width: 420px; box-sizing: border-box; }
             .ts-chk { width: 16px; height: 16px; cursor: pointer; }
             .ts-save-row { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
