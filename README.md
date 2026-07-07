@@ -19,38 +19,6 @@
 
 ---
 
-## 🟡 Статус beta
-
-Текущая beta уже “дышит” на OpenWrt 24.10.5/R3S:
-
-- ✅ `luci.torrserver` регистрируется в `ubus`.
-- ✅ `status` отдаёт полный контракт `service/proc/ram/web/meta`.
-- ✅ `log` возвращает строки TorrServer из `logread`.
-- ✅ `Start / Stop / Restart` идут через штатный `luci.setInitAction`.
-- ✅ CPU по ядрам, RSS и системная RAM отображаются в LuCI.
-- ✅ Кнопки управления получают pending-state: `Starting...`, `Stopping...`, `Restarting...`.
-
-Проверочные команды:
-
-```sh
-ubus -v list luci.torrserver
-ubus call luci.torrserver status
-ubus call luci.torrserver log
-ubus call luci setInitAction '{"name":"torrserver","action":"restart"}'
-```
-
-Ожидается:
-
-```json
-{
-  "result": true
-}
-```
-
-для `luci.setInitAction`, а `luci.torrserver status` должен вернуть объект с секциями `service`, `proc`, `ram`, `web`, `meta`.
-
----
-
 ## ✨ Что умеет LuCI UI
 
 | Блок | Что показывает |
