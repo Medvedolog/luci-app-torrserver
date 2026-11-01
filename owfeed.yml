@@ -11,6 +11,8 @@ releases:
     format: apk
   - line: "24.10"
     format: ipk
+publish:
+  - target: github-pages
 packages:
   - name: luci-app-torrserver
     build: mkpkg
