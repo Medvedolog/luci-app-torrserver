@@ -1,0 +1,37 @@
+name: owfeed LuCI native IPK APKv3
+on:
+  push:
+    branches: ['build/owfeed-migration']
+    paths:
+      - 'luci/**'
+      - 'tools/stage-owfeed-luci.sh'
+      - 'owfeed.yml'
+      - '.github/workflows/owfeed-luci.yml'
+  workflow_dispatch:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: owfeed/owfeed/setup@v0.5.1
+        with:
+          version: v0.5.1
+      - name: Stage LuCI
+        run: sh tools/stage-owfeed-luci.sh
+      - name: Validate config and build native packages
+        run: |
+          owfeed plan
+          owfeed check
+          owfeed build
+      - name: Assert APKv3 and IPK assets
+        run: |
+          test "$(find dist/noarch -name 'luci-app-torrserver-*.apk' | wc -l)" -ge 1
+          test "$(find dist/all -name 'luci-app-torrserver_*.ipk' | wc -l)" -ge 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: torrserver-luci-owfeed-unsigned
+          path: dist/
+          if-no-files-found: error
