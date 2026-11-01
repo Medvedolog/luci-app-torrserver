@@ -198,51 +198,62 @@ luci-app-torrserver_<version>_noarch.apk
 
 ---
 
-## 🚀 Быстрая установка
+## 🚀 Установка на OpenWrt 25.12 (APK v3) и 24.10 (IPK)
 
-### 1. Установить daemon
+> **Важно для OpenWrt 25.12+:** локальные пакеты этого проекта не подписаны ключом стандартного репозитория OpenWrt. Установка требует `apk add --allow-untrusted ./имя-файла.apk`, а не просто `apk add ./имя-файла.apk`. Опция относится только к доверенному вами локальному пакету. [Документация OpenWrt](https://openwrt.org/docs/guide-user/additional-software/apk).
 
-Выберите один вариант:
+### 1. Выбрать и скачать правильные файлы
+
+1. Откройте [Releases](https://github.com/Medvedolog/luci-app-torrserver/releases) и выберите актуальный RC (для тестирования) либо стабильный выпуск.
+2. Выполните на роутере `cat /etc/openwrt_release | grep -E 'DISTRIB_RELEASE|DISTRIB_ARCH'`. На OpenWrt 25.12 дополнительно выполните `apk --print-arch`.
+3. Скачайте **один** daemon-пакет `torrserver` для архитектуры роутера и отдельно `luci-app-torrserver` из того же выпуска. Не устанавливайте одновременно `torrserver`, `torrserver-upx` и `torrserver-official`: они используют один и тот же `/usr/bin/torrserver`.
+4. Перенесите оба файла на роутер в `/tmp` (например, SCP/SFTP) или скачайте их по HTTPS непосредственно на роутер. Имена файлов ниже замените фактическими именами из Assets.
+
+**Архитектура:** `x86_64` → `x86_64`; `aarch64_generic` → `aarch64_generic`; `aarch64_cortex-a53` → `aarch64_cortex-a53`. Не подбирайте архитектуру по названию процессора на глаз.
+
+### 2. Установить OpenWrt 25.12+ (APK)
 
 ```sh
-# OpenWrt 21–24
+cd /tmp
+apk --print-arch
+apk update
+
+# Проверьте имена через ls; ниже только пример для aarch64_cortex-a53:
+ls -lh *torrserver*.apk
+
+# Подставьте точные имена двух скачанных файлов:
+apk add --allow-untrusted ./torrserver_<version>_aarch64_cortex-a53.apk
+apk add --allow-untrusted ./luci-app-torrserver_<version>_noarch.apk
+```
+
+**Важно:** `apk add --allow-untrusted` не исправляет несовместимость форматов. OpenWrt 25.12 использует **APK v3**. Если вывод содержит `v2 package format error` или ошибку разбора пакета, не пытайтесь принудительно установить его: это проблема сборки/формата файла, которую необходимо исправить в release workflow. Создание файла с расширением `.apk` само по себе не гарантирует APK v3.
+
+### 3. Альтернатива для OpenWrt 24.10 и старее (IPK)
+
+```sh
+cd /tmp
+opkg update
 opkg install ./torrserver_<version>_<arch>.ipk
-# или
-opkg install ./torrserver-upx_<version>_<arch>.ipk
-```
-
-```sh
-# OpenWrt 25+
-apk add ./torrserver_<version>_<arch>.apk
-# или
-apk add ./torrserver-upx_<version>_<arch>.apk
-```
-
-### 2. Установить LuCI companion
-
-```sh
-# OpenWrt 21–24
 opkg install ./luci-app-torrserver_<version>_all.ipk
 ```
 
-```sh
-# OpenWrt 25+
-apk add ./luci-app-torrserver_<version>_noarch.apk
-```
+Не используйте `opkg` на штатном OpenWrt 25.12 и не устанавливайте `.ipk` через `apk`.
 
-### 3. Перезапустить сервисы web/RPC
+### 4. Проверка после установки
 
 ```sh
+ls -l /usr/bin/torrserver /etc/init.d/torrserver /usr/libexec/rpcd/luci.torrserver
+uci -q get torrserver.main.enabled
+/etc/init.d/torrserver status
 /etc/init.d/rpcd restart
 /etc/init.d/uhttpd reload
-rm -f /tmp/luci-indexcache /tmp/luci-modulecache/*
+ubus call luci.torrserver status
+logread -e torrserver | tail -n 50
 ```
 
-После этого открыть:
+Откройте **LuCI → Services → TorrServer**. Если daemon отключён в UCI (`enabled=0`), включите его через интерфейс перед запуском. После установки убедитесь, что Web UI открывается по адресу `http://IP-РОУТЕРА:8090/` (или по настроенному порту).
 
-```text
-LuCI → Services → TorrServer
-```
+Для обновления сначала сохраните резервную копию `/etc/config/torrserver` и каталога данных. При тестировании RC сообщайте о версии OpenWrt, архитектуре, номере релиза, ошибках `apk` и результатах проверки `ubus` (без токенов и паролей).
 
 ---
 
