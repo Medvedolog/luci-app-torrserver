@@ -2,6 +2,8 @@ name: Build and Release TorrServer for OpenWrt
 
 on:
   push:
+    branches:
+      - 'rc/**'
     tags:
       - 'MatriX*'
       - 'v*'
@@ -83,9 +85,13 @@ jobs:
             USE_UPX_INPUT="${{ github.event.inputs.use_upx }}"
             INCLUDE_LUCI="${{ github.event.inputs.include_luci }}"
           else
-            REQUESTED_REF="${GITHUB_REF_NAME}"
+            if [[ "${GITHUB_REF_NAME}" == rc/* ]]; then
+              REQUESTED_REF="MatriX.148"
+            else
+              REQUESTED_REF="${GITHUB_REF_NAME}"
+            fi
             BINARY_SOURCE="build-optimized"
-            USE_UPX_INPUT="true"
+            USE_UPX_INPUT="false"
             INCLUDE_LUCI="true"
           fi
 
@@ -132,6 +138,10 @@ jobs:
 
           RELEASE_TAG="openwrt-${RESOLVED_REF}"
           RELEASE_NAME="TorrServer ${RESOLVED_REF} for OpenWrt"
+          if [[ "${GITHUB_REF_NAME}" == rc/* ]]; then
+            RELEASE_TAG="openwrt-${RESOLVED_REF}-rc.${GITHUB_RUN_NUMBER}"
+            RELEASE_NAME="TorrServer ${RESOLVED_REF} OpenWrt RC ${GITHUB_RUN_NUMBER} (testing)"
+          fi
 
           {
             echo "REQUESTED_REF=${REQUESTED_REF}"
@@ -729,4 +739,4 @@ jobs:
           files: |
             dist/*
           draft: false
-          prerelease: false
+          prerelease: ${{ startsWith(github.ref, 'refs/heads/rc/') }}
