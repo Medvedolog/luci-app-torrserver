@@ -304,7 +304,11 @@ method_log() {
 		return 0
 	fi
 
-	lines="$(printf '%s\n' "$lines_raw" | json_line_array)"
+	if [ -n "$lines_raw" ]; then
+        lines="$(printf '%s\n' "$lines_raw" | json_line_array)"
+    else
+        lines="[]"
+    fi
 	[ -n "$lines" ] || lines="[]"
 	source_json="$(printf '%s' "$source" | json_string)"
 	printf '{"available":true,"lines":%s,"source":%s}\n' "$lines" "$source_json"

@@ -581,10 +581,7 @@ return view.extend({
                 change: function() {
                     const en = this.checked;
                     uci.set('torrserver', 'main', 'enabled', en ? '1' : '0');
-                    /* Синхронизируем rc.d */
-                    (en ? callEnable() : callDisable()).catch(function(err) {
-                        ui.addNotification(null, E('p', {}, 'Не удалось изменить автозапуск: ' + rpcErrorHint(err)), 'danger');
-                    });
+                    /* Sync rc.d after UCI save/apply, not on checkbox change. */
                 }
             };
             if (checked)
@@ -653,6 +650,11 @@ return view.extend({
                 click: function() {
                     uci.save().then(function() {
                         return uci.apply(30);
+                    }).then(function() {
+                        const enabled = uci.get('torrserver', 'main', 'enabled') !== '0';
+                        return (enabled ? callEnable() : callDisable()).then(function(result) {
+                            if (!result.ok) throw new Error('Не удалось синхронизировать автозапуск');
+                        });
                     }).then(function() {
                         ui.addNotification(null, E('p', {}, 'Настройки применены.'), 'info');
                         /* После apply — обновляем статус чтобы убедиться что сервис поднялся */
