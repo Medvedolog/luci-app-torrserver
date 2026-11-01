@@ -1,0 +1,73 @@
+name: owfeed daemon native IPK APKv3 (candidate)
+on:
+  push:
+    branches: ['build/owfeed-migration']
+    paths:
+      - 'packaging/**'
+      - 'tools/stage-owfeed-daemon.sh'
+      - 'owfeed.daemon.yml'
+      - '.github/workflows/owfeed-daemon.yml'
+  workflow_dispatch:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: "daemon ${{ matrix.arch }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64_generic
+            asset: TorrServer-linux-arm64
+            machine: AArch64
+          - arch: aarch64_cortex-a53
+            asset: TorrServer-linux-arm64
+            machine: AArch64
+          - arch: x86_64
+            asset: TorrServer-linux-amd64
+            machine: X86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: owfeed/owfeed/setup@v0.5.1
+        with:
+          version: v0.5.1
+      - name: Fetch exact upstream binary and verify ELF
+        env:
+          ASSET: ${{ matrix.asset }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 \
+            "https://github.com/YouROK/TorrServer/releases/download/MatriX.148/${ASSET}" \
+            -o torrserver-upstream
+          test -s torrserver-upstream
+          file torrserver-upstream
+          readelf -h torrserver-upstream | grep -F "${MACHINE}"
+          sha256sum torrserver-upstream > upstream-binary.sha256
+      - name: Stage daemon and generate arch-specific package config
+        env:
+          OWFEED_ARCH: ${{ matrix.arch }}
+          TORRSERVER_BINARY: ./torrserver-upstream
+          TORRSERVER_VERSION: 148-r1
+        run: |
+          set -euo pipefail
+          sh tools/stage-owfeed-daemon.sh
+          sed "s/__ARCH__/${OWFEED_ARCH}/g" owfeed.daemon.yml > owfeed.generated.yml
+          ! grep -q '__ARCH__' owfeed.generated.yml
+          cp owfeed.generated.yml owfeed.yml
+      - name: Build packages using native owfeed formats
+        run: |
+          owfeed plan
+          owfeed check
+          owfeed build
+          test -n "$(find dist -name '*.apk' -print -quit)"
+          test -n "$(find dist -name '*.ipk' -print -quit)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: torrserver-owfeed-${{ matrix.arch }}-test
+          path: |
+            dist/
+            upstream-binary.sha256
+          if-no-files-found: error

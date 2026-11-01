@@ -1,0 +1,72 @@
+name: owfeed LuCI native IPK APKv3
+on:
+  push:
+    branches: ['build/owfeed-migration']
+    paths:
+      - 'luci/**'
+      - 'tools/stage-owfeed-luci.sh'
+      - 'owfeed.yml'
+      - '.github/workflows/owfeed-luci.yml'
+  workflow_dispatch:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: owfeed/owfeed/setup@v0.5.1
+        with:
+          version: v0.5.1
+      - name: Stage LuCI
+        run: sh tools/stage-owfeed-luci.sh
+      - name: Validate config and build native packages
+        run: |
+          owfeed plan
+          owfeed check
+          owfeed build
+      - name: Assert APKv3 and IPK assets
+        run: |
+          test "$(find dist/noarch -name 'luci-app-torrserver-*.apk' | wc -l)" -ge 1
+          test "$(find dist/all -name 'luci-app-torrserver_*.ipk' | wc -l)" -ge 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: torrserver-luci-owfeed-unsigned
+          path: dist/
+          if-no-files-found: error
+  verify:
+    name: Install LuCI on OpenWrt 24.10 and 25.12
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: torrserver-luci-owfeed-unsigned
+          path: dist/
+      - uses: owfeed/owlab/setup@v0.6.5
+        with:
+          version: v0.6.5
+      - name: OpenWrt 25.12 APKv3
+        uses: owfeed/owlab/action@v0.6.5
+        with:
+          version: v0.6.5
+          releases: "25.12.5"
+          install: dist/noarch/luci-app-torrserver-*.apk
+          assert: |
+            package luci-app-torrserver
+            file /usr/share/luci/menu.d/luci-app-torrserver.json
+            file /usr/share/rpcd/acl.d/luci-app-torrserver.json
+            file /usr/libexec/rpcd/luci.torrserver
+      - name: OpenWrt 24.10 IPK
+        uses: owfeed/owlab/action@v0.6.5
+        with:
+          version: v0.6.5
+          releases: "24.10.8"
+          install: dist/all/luci-app-torrserver_*.ipk
+          assert: |
+            package luci-app-torrserver
+            file /usr/share/luci/menu.d/luci-app-torrserver.json
+            file /usr/share/rpcd/acl.d/luci-app-torrserver.json
+            file /usr/libexec/rpcd/luci.torrserver
