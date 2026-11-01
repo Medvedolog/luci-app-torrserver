@@ -35,3 +35,38 @@ jobs:
           name: torrserver-luci-owfeed-unsigned
           path: dist/
           if-no-files-found: error
+  verify:
+    name: Install LuCI on OpenWrt 24.10 and 25.12
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: torrserver-luci-owfeed-unsigned
+          path: dist/
+      - uses: owfeed/owlab/setup@v0.6.5
+        with:
+          version: v0.6.5
+      - name: OpenWrt 25.12 APKv3
+        uses: owfeed/owlab/action@v0.6.5
+        with:
+          version: v0.6.5
+          releases: "25.12.5"
+          install: dist/noarch/luci-app-torrserver-*.apk
+          assert: |
+            package luci-app-torrserver
+            file /usr/share/luci/menu.d/luci-app-torrserver.json
+            file /usr/share/rpcd/acl.d/luci-app-torrserver.json
+            file /usr/libexec/rpcd/luci.torrserver
+      - name: OpenWrt 24.10 IPK
+        uses: owfeed/owlab/action@v0.6.5
+        with:
+          version: v0.6.5
+          releases: "24.10.8"
+          install: dist/all/luci-app-torrserver_*.ipk
+          assert: |
+            package luci-app-torrserver
+            file /usr/share/luci/menu.d/luci-app-torrserver.json
+            file /usr/share/rpcd/acl.d/luci-app-torrserver.json
+            file /usr/libexec/rpcd/luci.torrserver
