@@ -306,7 +306,7 @@ jobs:
               option port '8090'
               option path '/opt/torrserver'
               option proxymode 'tracker'
-              option dontkill '1'
+              option dontkill '0'
               option httpauth '0'
               option rdb '0'
               option ip ''
@@ -377,7 +377,7 @@ jobs:
               config_get path main path '/opt/torrserver'
               config_get proxymode main proxymode 'tracker'
               proxymode="$(normalize_proxymode "$proxymode")"
-              config_get_bool dontkill main dontkill 1
+              config_get_bool dontkill main dontkill 0
               config_get_bool httpauth main httpauth 0
               config_get_bool rdb main rdb 0
 
@@ -444,8 +444,13 @@ jobs:
           echo "Binary path: /usr/bin/torrserver"
           [ -n "\${IPKG_INSTROOT}" ] && exit 0
           [ -n "\${APK_INSTROOT}" ] && exit 0
-          /etc/init.d/torrserver enable >/dev/null 2>&1 || true
-          /etc/init.d/torrserver restart >/dev/null 2>&1 || /etc/init.d/torrserver start >/dev/null 2>&1 || true
+          if [ "$(uci -q get torrserver.main.enabled)" = "1" ]; then
+            /etc/init.d/torrserver enable >/dev/null 2>&1 || true
+            /etc/init.d/torrserver restart >/dev/null 2>&1 || /etc/init.d/torrserver start >/dev/null 2>&1 || true
+          else
+            /etc/init.d/torrserver disable >/dev/null 2>&1 || true
+            /etc/init.d/torrserver stop >/dev/null 2>&1 || true
+          fi
           /etc/init.d/torrserver status 2>/dev/null || true
           exit 0
           EOF_POST
