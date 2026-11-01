@@ -1,0 +1,69 @@
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+USE_PROCD=1
+PROG=/usr/bin/torrserver
+. /lib/functions.sh
+
+service_triggers() { procd_add_reload_trigger torrserver; }
+arg() { [ -z "$1" ] || procd_append_param command "$2" "$1"; }
+flag() { [ "$1" != 1 ] || procd_append_param command "$2"; }
+start_service() {
+    local enabled port path proxymode ip logpath weblogpath torrentsdir torrentaddr
+    local pubipv4 pubipv6 maxsize tg fuse proxyurl dontkill httpauth rdb searchwa webdav
+    [ -x "$PROG" ] || return 1
+    config_load torrserver
+    config_get_bool enabled main enabled 1
+    [ "$enabled" = 1 ] || return 0
+    config_get port main port 8090
+    config_get path main path /opt/torrserver
+    config_get proxymode main proxymode tracker
+    config_get ip main ip ''
+    config_get logpath main logpath ''
+    config_get weblogpath main weblogpath ''
+    config_get torrentsdir main torrentsdir ''
+    config_get torrentaddr main torrentaddr ''
+    config_get pubipv4 main pubipv4 ''
+    config_get pubipv6 main pubipv6 ''
+    config_get maxsize main maxsize ''
+    config_get tg main tg ''
+    config_get fuse main fuse ''
+    config_get proxyurl main proxyurl ''
+    config_get_bool dontkill main dontkill 0
+    config_get_bool httpauth main httpauth 0
+    config_get_bool rdb main rdb 0
+    config_get_bool searchwa main searchwa 0
+    config_get_bool webdav main webdav 0
+    mkdir -p "$path"
+    procd_open_instance
+    procd_set_param command "$PROG"
+    arg "$port" --port
+    arg "$path" --path
+    case "$proxymode" in
+        tracker|peers|full) arg "$proxymode" --proxymode ;;
+        all) arg full --proxymode ;;
+        ""|off|none|disabled) ;;
+        *) logger -t torrserver "Invalid proxymode: $proxymode"; return 1 ;;
+    esac
+    arg "$ip" --ip
+    arg "$logpath" --logpath
+    arg "$weblogpath" --weblogpath
+    arg "$torrentsdir" --torrentsdir
+    arg "$torrentaddr" --torrentaddr
+    arg "$pubipv4" --pubipv4
+    arg "$pubipv6" --pubipv6
+    arg "$maxsize" --maxsize
+    arg "$tg" --tg
+    arg "$fuse" --fuse
+    arg "$proxyurl" --proxyurl
+    flag "$dontkill" --dontkill
+    flag "$httpauth" --httpauth
+    flag "$rdb" --rdb
+    flag "$searchwa" --searchwa
+    flag "$webdav" --webdav
+    procd_set_param term_timeout 5
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
