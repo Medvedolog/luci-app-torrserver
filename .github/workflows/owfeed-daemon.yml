@@ -55,18 +55,19 @@ jobs:
           set -euo pipefail
           sh tools/stage-owfeed-daemon.sh
           sed "s/__ARCH__/${OWFEED_ARCH}/g" owfeed.daemon.yml > owfeed.generated.yml
-          test "$(grep -c '__ARCH__' owfeed.generated.yml || true)" -eq 0
+          ! grep -q '__ARCH__' owfeed.generated.yml
+          cp owfeed.generated.yml owfeed.yml
       - name: Build packages using native owfeed formats
         run: |
-          owfeed --config owfeed.generated.yml plan
-          owfeed --config owfeed.generated.yml check
+          owfeed plan
+          owfeed check
+          owfeed build
           test -n "$(find dist -name '*.apk' -print -quit)"
           test -n "$(find dist -name '*.ipk' -print -quit)"
       - uses: actions/upload-artifact@v4
         with:
           name: torrserver-owfeed-${{ matrix.arch }}-test
           path: |
-            dist/**/*.apk
-            dist/**/*.ipk
+            dist/
             upstream-binary.sha256
           if-no-files-found: error
