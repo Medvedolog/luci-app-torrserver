@@ -1,0 +1,28 @@
+# Generated per architecture by tools/render-owfeed-daemon.sh
+version: 1
+feed:
+  name: torrserver-daemon
+  url: https://github.com/Medvedolog/luci-app-torrserver
+  maintainer: "Medvedolog <Medvedolog@github.com>"
+releases:
+  - line: "25.12"
+    default: true
+    format: apk
+  - line: "24.10"
+    format: ipk
+packages:
+  - name: torrserver
+    build: mkpkg
+    arch: __ARCH__
+    version-from: file:./dist/daemon/VERSION
+    files: ./dist/daemon/root
+    description: "Official upstream TorrServer binary with procd service"
+    depends: [procd, uci]
+    conffiles: ["/etc/config/torrserver"]
+    license: GPL-3.0
+    url: https://github.com/YouROK/TorrServer
+    maintainer: "Medvedolog <Medvedolog@github.com>"
+    repo-commit: env:GITHUB_SHA
+    scripts:
+      post-install: ./dist/daemon/scripts/postinst
+      pre-deinstall: ./dist/daemon/scripts/prerm
