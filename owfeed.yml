@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://owfeed.org/schema/v1.json
+version: 1
+feed:
+  name: luci-app-torrserver
+  url: https://github.com/Medvedolog/luci-app-torrserver
+  title: LuCI TorrServer
+  maintainer: "Medvedolog <Medvedolog@github.com>"
+releases:
+  - line: "25.12"
+    default: true
+    format: apk
+  - line: "24.10"
+    format: ipk
+packages:
+  - name: luci-app-torrserver
+    build: mkpkg
+    arch: noarch
+    version-from: file:./dist/VERSION
+    files: ./dist/root
+    description: "LuCI companion for TorrServer with rpcd backend, status and settings"
+    depends: [luci-base, rpcd]
+    license: MIT
+    url: https://github.com/Medvedolog/luci-app-torrserver
+    maintainer: "Medvedolog <Medvedolog@github.com>"
+    repo-commit: env:GITHUB_SHA
+    scripts:
+      post-install: ./dist/scripts/postinst
+      pre-deinstall: ./dist/scripts/prerm
